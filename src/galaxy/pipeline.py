@@ -59,7 +59,7 @@ def run_pipeline(
             search_result = query_archive(shape_kind, shape_kwargs, config.search, progress=progress)
             if progress:
                 progress("Selecting deterministic product set")
-            selected_products = select_products(search_result.products)
+            selected_products = select_products(search_result.products, config.search)
             if progress:
                 progress(f"Selected {len(selected_products)} products for download")
             if not selected_products:
@@ -245,3 +245,4 @@ def _finalize_artifacts(output_dir: Path) -> PipelineArtifacts:
         provenance_path=output_dir / "provenance.json",
         config_path=output_dir / "run_config.yaml",
     )
+

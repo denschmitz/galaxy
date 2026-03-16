@@ -43,3 +43,23 @@ def test_select_products_prefers_newer_version_then_identifier() -> None:
     ]
     selected = select_products(products)
     assert selected[0]["productFilename"] == "jw_a_v3.fits"
+
+
+def test_select_products_can_keep_latest_per_filter() -> None:
+    products = [
+        {"obs_id": "A", "filters": "F657N", "productType": "SCIENCE", "productFilename": "a.fits", "_obs_t_max": 1.0},
+        {"obs_id": "B", "filters": "F657N", "productType": "SCIENCE", "productFilename": "b.fits", "_obs_t_max": 5.0},
+        {"obs_id": "C", "filters": "F673N", "productType": "SCIENCE", "productFilename": "c.fits", "_obs_t_max": 3.0},
+    ]
+    selected = select_products(products, SearchConfig(observation_selection="latest_per_filter", max_observations_per_filter=1))
+    assert [item["productFilename"] for item in selected] == ["b.fits", "c.fits"]
+
+
+def test_select_products_can_keep_deepest_per_filter() -> None:
+    products = [
+        {"obs_id": "A", "filters": "F657N", "productType": "SCIENCE", "productFilename": "a.fits", "_obs_exptime": 100.0},
+        {"obs_id": "B", "filters": "F657N", "productType": "SCIENCE", "productFilename": "b.fits", "_obs_exptime": 300.0},
+        {"obs_id": "C", "filters": "F673N", "productType": "SCIENCE", "productFilename": "c.fits", "_obs_exptime": 200.0},
+    ]
+    selected = select_products(products, SearchConfig(observation_selection="deepest_per_filter", max_observations_per_filter=1))
+    assert [item["productFilename"] for item in selected] == ["b.fits", "c.fits"]

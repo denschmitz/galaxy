@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
 
 from astropy.io import fits
@@ -92,7 +91,7 @@ def _float_or_none(value: object) -> float | None:
 
 def _populate_plane_header(header: fits.Header, plane: ReprojectedPlane) -> None:
     metadata = dict(plane.metadata)
-    header["PLANEID"] = plane.plane_id
+    header["PLANEID"] = plane.plane_id[:68]
     if metadata.get("filter") is not None:
         header["FILTER"] = str(metadata["filter"])
     if metadata.get("mission") is not None:
@@ -108,16 +107,9 @@ def _populate_plane_header(header: fits.Header, plane: ReprojectedPlane) -> None
             header["EXPTIME"] = float(metadata["exposure_time"])
         except (TypeError, ValueError):
             pass
-    header["HIERARCH GALAXY METADATA"] = json.dumps(metadata, sort_keys=True, default=str)
 
 
 def _metadata_from_header(header: fits.Header, plane_id: str) -> dict[str, object]:
-    serialized = header.get("GALAXY METADATA")
-    if serialized:
-        try:
-            return json.loads(serialized)
-        except json.JSONDecodeError:
-            pass
     return {
         "plane_id": plane_id,
         "filter": header.get("FILTER"),

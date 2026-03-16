@@ -22,30 +22,31 @@ def load_fits_plane(path: str | Path) -> FITSPlane:
     source = Path(path)
     with fits.open(source) as hdul:
         science_index = _select_science_hdu(hdul)
-        header = hdul[science_index].header
-        if "CTYPE1" not in header or "CTYPE2" not in header:
+        science_header = hdul[science_index].header
+        primary_header = hdul[0].header if hdul else science_header
+        if "CTYPE1" not in science_header or "CTYPE2" not in science_header:
             raise ValueError(f"missing WCS in {source}")
         data = np.asarray(hdul[science_index].data, dtype=np.float32)
         dq_mask = _load_dq_mask(hdul, data.shape)
         metadata = {
             "source_path": str(source),
             "extension": science_index,
-            "filter": header.get("FILTER") or header.get("FILTER1") or header.get("PUPIL"),
-            "instrument": header.get("INSTRUME"),
-            "detector": header.get("DETECTOR"),
-            "mission": header.get("TELESCOP"),
-            "observation_id": header.get("OBS_ID") or header.get("ROOTNAME"),
-            "exposure_time": header.get("EXPTIME"),
+            "filter": _header_value(primary_header, science_header, "FILTER", "FILTER1", "FILTER2", "PUPIL"),
+            "instrument": _header_value(primary_header, science_header, "INSTRUME"),
+            "detector": _header_value(primary_header, science_header, "DETECTOR"),
+            "mission": _header_value(primary_header, science_header, "TELESCOP"),
+            "observation_id": _header_value(primary_header, science_header, "OBS_ID", "ROOTNAME"),
+            "exposure_time": _header_value(primary_header, science_header, "EXPTIME"),
             "header_subset": {
-                key: header.get(key)
+                key: science_header.get(key)
                 for key in ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", "CD1_1", "CD1_2", "CD2_1", "CD2_2"]
-                if key in header
+                if key in science_header
             },
         }
         return FITSPlane(
             plane_id=source.stem,
             data=data,
-            wcs=WCS(header),
+            wcs=WCS(science_header),
             metadata=metadata,
             mask=dq_mask,
         )
@@ -66,3 +67,12 @@ def _load_dq_mask(hdul: fits.HDUList, shape: tuple[int, ...]) -> np.ndarray | No
         if str(hdu.name).upper() == "DQ" and getattr(hdu, "data", None) is not None:
             return np.asarray(hdu.data != 0, dtype=bool)
     return np.zeros(shape, dtype=bool)
+
+
+def _header_value(primary_header: fits.Header, science_header: fits.Header, *keys: str) -> Any:
+    for key in keys:
+        if key in science_header and science_header.get(key) is not None:
+            return science_header.get(key)
+        if key in primary_header and primary_header.get(key) is not None:
+            return primary_header.get(key)
+    return None

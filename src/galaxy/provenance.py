@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -35,7 +36,7 @@ def build_provenance(
         },
         "source_files": manifest,
         "skipped_products": skipped,
-        "planes": [record.__dict__ for record in plane_records],
+        "planes": [asdict(record) for record in plane_records],
         "reprojection": reprojection_settings,
         "psf": config.psf.model_dump(mode="json"),
         "mapping": config.mapping.model_dump(mode="json"),

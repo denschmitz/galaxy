@@ -53,6 +53,8 @@ class SearchConfig(BaseModel):
     product_types: list[str] = Field(default_factory=lambda: ["SCIENCE", "DRZ", "DRC", "I2D"])
     observation_date_start: str | None = None
     observation_date_end: str | None = None
+    observation_selection: Literal["all", "latest_per_filter", "deepest_per_filter"] = "all"
+    max_observations_per_filter: int = Field(default=1, ge=1)
 
 
 class CanvasCenterResolvedTarget(BaseModel):

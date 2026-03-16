@@ -51,11 +51,8 @@ def query_archive(
     if not obs_rows:
         return SearchResult(observations=[], products=[])
 
-    observation_ids = list(
-        dict.fromkeys(
-            str(row.get("obsid") or "") for row in obs_rows if row.get("obsid") not in (None, "")
-        )
-    )
+    observation_metadata = _build_observation_metadata(obs_rows)
+    observation_ids = list(dict.fromkeys(observation_metadata))
     if progress:
         progress(f"Fetching product lists for {len(observation_ids)} observations in batches of {PRODUCT_LIST_BATCH_SIZE}")
 
@@ -69,6 +66,7 @@ def query_archive(
 
     if progress:
         progress(f"Retrieved {len(product_rows)} raw products before filtering")
+    product_rows = _enrich_products(product_rows, observation_metadata)
     product_rows = filter_products(product_rows, search)
     if progress:
         progress(f"{len(product_rows)} products remain after detector/filter/type/date filtering")
@@ -96,9 +94,9 @@ def filter_products(products: list[dict[str, Any]], search: SearchConfig) -> lis
         allowed = {item.upper() for item in search.product_types}
         rows = [row for row in rows if str(row.get("productType", "")).upper() in allowed]
     if search.observation_date_start:
-        rows = [row for row in rows if str(row.get("t_min", "")) >= search.observation_date_start]
+        rows = [row for row in rows if str(row.get("_obs_t_min", row.get("t_min", ""))) >= search.observation_date_start]
     if search.observation_date_end:
-        rows = [row for row in rows if str(row.get("t_max", "")) <= search.observation_date_end]
+        rows = [row for row in rows if str(row.get("_obs_t_max", row.get("t_max", ""))) <= search.observation_date_end]
     return rows
 
 
@@ -132,15 +130,15 @@ def _version_rank(product: dict[str, Any]) -> tuple[int, ...]:
     return (0,)
 
 
-def select_products(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def select_products(products: list[dict[str, Any]], search: SearchConfig | None = None) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for product in products:
         key = (str(product.get("obs_id", "")), str(product.get("filters", "")))
         grouped.setdefault(key, []).append(product)
-    selected: list[dict[str, Any]] = []
-    for key in sorted(grouped):
-        selected.append(sorted(grouped[key], key=rank_product)[0])
-    return selected
+    selected = [sorted(grouped[key], key=rank_product)[0] for key in sorted(grouped)]
+    if search is None or search.observation_selection == "all":
+        return selected
+    return _select_best_observations(selected, search)
 
 
 def download_products(
@@ -190,6 +188,63 @@ def download_products(
             if progress:
                 progress(f"Download failed for {filename}: {exc}")
     return manifest, skipped
+
+
+def _build_observation_metadata(observations: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for row in observations:
+        obsid = str(row.get("obsid") or "")
+        if not obsid:
+            continue
+        metadata[obsid] = {
+            "_obs_t_min": row.get("t_min"),
+            "_obs_t_max": row.get("t_max"),
+            "_obs_exptime": row.get("t_exptime") or row.get("exptime") or row.get("exposure_time"),
+            "_obs_collection": row.get("obs_collection"),
+            "_obs_instrument": row.get("instrument_name"),
+        }
+    return metadata
+
+
+def _enrich_products(products: list[dict[str, Any]], observation_metadata: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for product in products:
+        merged = dict(product)
+        metadata = observation_metadata.get(str(product.get("obsid") or ""), {})
+        merged.update(metadata)
+        enriched.append(merged)
+    return enriched
+
+
+def _select_best_observations(products: list[dict[str, Any]], search: SearchConfig) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for product in products:
+        filter_name = str(product.get("filters") or product.get("filter") or "").upper()
+        key = filter_name or stable_product_identifier(product)
+        grouped.setdefault(key, []).append(product)
+
+    selected: list[dict[str, Any]] = []
+    for key in sorted(grouped):
+        ranked = sorted(grouped[key], key=lambda item: _observation_rank(item, search.observation_selection))
+        selected.extend(ranked[: search.max_observations_per_filter])
+    return selected
+
+
+def _observation_rank(product: dict[str, Any], strategy: str) -> tuple[float, float, tuple[int, ...], str]:
+    if strategy == "deepest_per_filter":
+        primary = -_safe_float(product.get("_obs_exptime"), default=0.0)
+        secondary = -_safe_float(product.get("_obs_t_max"), default=0.0)
+    else:
+        primary = -_safe_float(product.get("_obs_t_max"), default=0.0)
+        secondary = -_safe_float(product.get("_obs_exptime"), default=0.0)
+    return (primary, secondary, _version_rank(product), stable_product_identifier(product))
+
+
+def _safe_float(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _batched(items: list[str], batch_size: int) -> list[list[str]]:
