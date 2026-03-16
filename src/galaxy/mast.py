@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 from astroquery.mast import Observations
@@ -79,13 +80,34 @@ def filter_products(products: list[dict[str, Any]], search: SearchConfig) -> lis
     return rows
 
 
-def rank_product(product: dict[str, Any]) -> tuple[int, int, str, str]:
+def rank_product(product: dict[str, Any]) -> tuple[int, int, tuple[int, ...], str]:
     product_type = str(product.get("productType", "")).upper()
     filename = str(product.get("productFilename", ""))
     fits_penalty = 0 if filename.lower().endswith((".fits", ".fits.gz")) else 1
-    version = str(product.get("productSubGroupDescription", ""))
-    obs_id = str(product.get("obs_id", ""))
-    return (PRODUCT_TYPE_PRIORITY.get(product_type, 99), fits_penalty, version, obs_id)
+    version_rank = _version_rank(product)
+    identifier = stable_product_identifier(product)
+    return (PRODUCT_TYPE_PRIORITY.get(product_type, 99), fits_penalty, version_rank, identifier)
+
+
+def stable_product_identifier(product: dict[str, Any]) -> str:
+    return str(
+        product.get("productFilename")
+        or product.get("dataURI")
+        or product.get("obsID")
+        or product.get("obs_id")
+        or ""
+    ).lower()
+
+
+def _version_rank(product: dict[str, Any]) -> tuple[int, ...]:
+    version_source = " ".join(
+        str(product.get(field, "") or "")
+        for field in ("productVersion", "productSubGroupDescription", "dataURI", "productFilename")
+    )
+    version_parts = [int(part) for part in re.findall(r"\d+", version_source)]
+    if version_parts:
+        return tuple(-part for part in version_parts)
+    return (0,)
 
 
 def select_products(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -117,6 +139,17 @@ def download_products(
             manifest.append(
                 {
                     "product_identifier": product.get("obs_id", filename),
+                    "stable_product_identifier": stable_product_identifier(product),
+                    "product_filename": product.get("productFilename"),
+                    "filter": product.get("filters"),
+                    "product_type": product.get("productType"),
+                    "product_version": product.get("productVersion") or product.get("productSubGroupDescription"),
+                    "selection_rank": [
+                        rank_product(product)[0],
+                        rank_product(product)[1],
+                        list(rank_product(product)[2]),
+                        rank_product(product)[3],
+                    ],
                     "url": url,
                     "local_path": details["local_path"],
                     "file_size": details["file_size"],
@@ -129,6 +162,7 @@ def download_products(
             skipped.append(
                 {
                     "product_identifier": product.get("obs_id", filename),
+                    "stable_product_identifier": stable_product_identifier(product),
                     "url": url,
                     "reason": str(exc),
                 }

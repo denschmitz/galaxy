@@ -8,7 +8,8 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
 import numpy as np
-from reproject import reproject_adaptive, reproject_interp
+from reproject.adaptive.core import _reproject_adaptive_2d
+from reproject.interpolation.core import _reproject_full
 
 from galaxy.config import CanvasConfig
 from galaxy.fitsio import FITSPlane
@@ -52,8 +53,31 @@ def reproject_plane(
     shape_out: tuple[int, int],
     flux_conserving: bool,
 ) -> ReprojectedPlane:
-    reproject_fn = reproject_adaptive if flux_conserving else reproject_interp
-    data, footprint = reproject_fn((plane.data, plane.wcs), output_wcs, shape_out=shape_out)
+    if flux_conserving:
+        array_out = np.empty(shape_out, dtype=np.float64)
+        footprint_out = np.empty(shape_out, dtype=np.float64)
+        data, footprint = _reproject_adaptive_2d(
+            np.asarray(plane.data, dtype=np.float64),
+            plane.wcs,
+            output_wcs,
+            shape_out=shape_out,
+            array_out=array_out,
+            output_footprint=footprint_out,
+            return_footprint=True,
+            conserve_flux=True,
+        )
+    else:
+        array_out = np.empty(shape_out, dtype=np.float32)
+        footprint_out = np.empty(shape_out, dtype=np.float32)
+        data, footprint = _reproject_full(
+            np.asarray(plane.data, dtype=np.float32),
+            plane.wcs,
+            output_wcs,
+            shape_out=shape_out,
+            array_out=array_out,
+            output_footprint=footprint_out,
+            return_footprint=True,
+        )
     return ReprojectedPlane(
         plane_id=plane.plane_id,
         data=np.nan_to_num(data.astype(np.float32), nan=0.0),

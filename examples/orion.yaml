@@ -68,6 +68,3 @@ psf:
 
 execution:
   fail_fast: false
-  preview_downsample: 4
-  overwrite_outputs: true
-

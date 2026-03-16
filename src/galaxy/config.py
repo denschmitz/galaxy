@@ -166,7 +166,7 @@ class ToneConfig(BaseModel):
 class PSFPlaneConfig(BaseModel):
     enabled: bool = False
     kernel_path: str | None = None
-    max_iterations: int = Field(default=0, ge=0, le=100)
+    max_iterations: int = Field(default=10, ge=1, le=100)
     regularization: float = Field(default=0.0, ge=0.0)
 
 
@@ -178,8 +178,6 @@ class PSFConfig(BaseModel):
 
 class ExecutionConfig(BaseModel):
     fail_fast: bool = False
-    preview_downsample: int = Field(default=4, ge=1)
-    overwrite_outputs: bool = True
 
 
 class GalaxyConfig(BaseModel):

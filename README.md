@@ -32,7 +32,7 @@ Galaxy produces presentation products. Nonlinear stretches, channel weighting, d
 - FITS ingestion with WCS-aware reprojection onto a user-defined canvas
 - Multi-plane export, RGB composition, PNG/TIFF export, and provenance reporting
 - Canonical YAML configuration for non-interactive execution and reproduction
-- Streamlit preview UI for tuning mappings and tone settings without re-downloading data
+- Streamlit preview UI for tuning mappings and tone settings without re-downloading data, with style export/import
 
 ## Installation on Windows 11 with Python 3.12
 
@@ -121,7 +121,7 @@ The Streamlit preview UI supports:
 - black/white percentile controls
 - per-channel gain
 - global saturation
-- save/load of style mappings
+- export/import of style mappings
 
 The UI operates on already aligned planes and does not trigger re-downloads.
 
@@ -134,7 +134,7 @@ Galaxy uses a single canonical YAML schema defined in [`src/galaxy/config.py`](/
 - output canvas
 - plane selection
 - mapping and tone settings
-- PSF/deconvolution settings
+- PSF/deconvolution settings using Richardson-Lucy deconvolution with either a common Gaussian PSF or per-plane kernel FITS files
 - execution policy and output paths
 
 See [`examples/orion.yaml`](/C:/Data/dev/galaxy/examples/orion.yaml) and [`examples/tutorial.md`](/C:/Data/dev/galaxy/examples/tutorial.md).

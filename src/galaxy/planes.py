@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 from astropy.io import fits
@@ -39,14 +40,7 @@ def export_multiplane_fits(planes: list[ReprojectedPlane], output_path: str | Pa
     hdus: list[fits.ImageHDU | fits.PrimaryHDU] = [fits.PrimaryHDU()]
     for plane in planes:
         header = fits.Header()
-        for key, value in plane.metadata.items():
-            if value is None:
-                continue
-            card_key = str(key).upper()[:8]
-            try:
-                header[card_key] = value
-            except Exception:
-                continue
+        _populate_plane_header(header, plane)
         hdus.append(fits.ImageHDU(data=np.asarray(plane.data, dtype=np.float32), header=header, name=plane.plane_id[:68]))
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +57,24 @@ def load_multiplane_fits(path: str | Path) -> dict[str, np.ndarray]:
         }
 
 
+def load_multiplane_records(path: str | Path) -> list[ReprojectedPlane]:
+    records: list[ReprojectedPlane] = []
+    with fits.open(path) as hdul:
+        for idx, hdu in enumerate(hdul[1:], start=1):
+            if getattr(hdu, "data", None) is None:
+                continue
+            plane_id = str(hdu.header.get("PLANEID") or hdu.name or f"PLANE{idx}")
+            records.append(
+                ReprojectedPlane(
+                    plane_id=plane_id,
+                    data=np.asarray(hdu.data, dtype=np.float32),
+                    footprint=np.ones_like(hdu.data, dtype=np.float32),
+                    metadata=_metadata_from_header(hdu.header, plane_id),
+                )
+            )
+    return records
+
+
 def _string_or_none(value: object) -> str | None:
     if value is None:
         return None
@@ -76,3 +88,42 @@ def _float_or_none(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _populate_plane_header(header: fits.Header, plane: ReprojectedPlane) -> None:
+    metadata = dict(plane.metadata)
+    header["PLANEID"] = plane.plane_id
+    if metadata.get("filter") is not None:
+        header["FILTER"] = str(metadata["filter"])
+    if metadata.get("mission") is not None:
+        header["MISSION"] = str(metadata["mission"])
+    if metadata.get("instrument") is not None:
+        header["INSTRUME"] = str(metadata["instrument"])
+    if metadata.get("detector") is not None:
+        header["DETECTOR"] = str(metadata["detector"])
+    if metadata.get("observation_id") is not None:
+        header["OBS_ID"] = str(metadata["observation_id"])
+    if metadata.get("exposure_time") is not None:
+        try:
+            header["EXPTIME"] = float(metadata["exposure_time"])
+        except (TypeError, ValueError):
+            pass
+    header["HIERARCH GALAXY METADATA"] = json.dumps(metadata, sort_keys=True, default=str)
+
+
+def _metadata_from_header(header: fits.Header, plane_id: str) -> dict[str, object]:
+    serialized = header.get("GALAXY METADATA")
+    if serialized:
+        try:
+            return json.loads(serialized)
+        except json.JSONDecodeError:
+            pass
+    return {
+        "plane_id": plane_id,
+        "filter": header.get("FILTER"),
+        "mission": header.get("MISSION"),
+        "instrument": header.get("INSTRUME"),
+        "detector": header.get("DETECTOR"),
+        "observation_id": header.get("OBS_ID"),
+        "exposure_time": header.get("EXPTIME"),
+    }

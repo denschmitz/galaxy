@@ -10,7 +10,7 @@ from galaxy.export import export_png, export_tiff
 from galaxy.fitsio import FITSPlane, load_fits_plane
 from galaxy.mapping import CompositionInputs, compose_channels
 from galaxy.mast import download_products, query_archive, select_products
-from galaxy.planes import build_plane_records, export_multiplane_fits, load_multiplane_fits
+from galaxy.planes import build_plane_records, export_multiplane_fits, load_multiplane_records
 from galaxy.provenance import build_provenance, write_provenance
 from galaxy.psf import apply_presentation_psf
 from galaxy.reprojection import ReprojectedPlane, build_output_wcs, reproject_all, save_reprojected_plane
@@ -126,8 +126,7 @@ def _load_or_build_reprojected(
 ) -> list[ReprojectedPlane]:
     exported_planes = output_dir / "exported_planes.fits"
     if mode == "compose-only" and exported_planes.exists():
-        arrays = load_multiplane_fits(exported_planes)
-        return [ReprojectedPlane(plane_id=name, data=data, footprint=data * 0 + 1, metadata={"filter": name}) for name, data in arrays.items()]
+        return load_multiplane_records(exported_planes)
 
     fits_planes: list[FITSPlane] = []
     for source_path in cached_paths:

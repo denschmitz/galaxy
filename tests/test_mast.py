@@ -22,3 +22,24 @@ def test_select_products_is_deterministic() -> None:
     selected = select_products(products)
     assert selected[0]["productType"] == "SCIENCE"
     assert rank_product(selected[0]) < rank_product(products[0])
+
+
+def test_select_products_prefers_newer_version_then_identifier() -> None:
+    products = [
+        {
+            "obs_id": "A",
+            "filters": "F200W",
+            "productType": "SCIENCE",
+            "productFilename": "jw_a_v1.fits",
+            "productSubGroupDescription": "v1",
+        },
+        {
+            "obs_id": "A",
+            "filters": "F200W",
+            "productType": "SCIENCE",
+            "productFilename": "jw_a_v3.fits",
+            "productSubGroupDescription": "v3",
+        },
+    ]
+    selected = select_products(products)
+    assert selected[0]["productFilename"] == "jw_a_v3.fits"
