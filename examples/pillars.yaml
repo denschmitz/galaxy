@@ -1,30 +1,35 @@
 target:
-  name: Orion Nebula
+  name: Pillars of Creation
+  ra_deg: 274.7003
+  dec_deg: -13.8067
   region:
-    kind: circle
-    radius_arcmin: 12.0
+    kind: box
+    width_arcmin: 2.0
+    height_arcmin: 1.6
 
 search:
-  missions: ["HST", "JWST"]
+  missions: ["HST"]
   instruments: []
   detectors: []
-  filters: []
-  product_types: ["SCIENCE", "DRZ", "DRC", "I2D"]
+  filters: ["F502N", "F657N", "F673N"]
+  product_types: ["SCIENCE", "DRZ", "DRC"]
   observation_date_start: null
   observation_date_end: null
 
 canvas:
   center:
-    mode: resolved_target
+    mode: explicit
+    ra_deg: 274.7003
+    dec_deg: -13.8067
   projection: TAN
   pixel_scale_arcsec: 0.08
-  width: 2400
-  height: 2400
+  width: 1600
+  height: 1280
   rotation_deg: 0.0
   flux_conserving: true
 
 planes:
-  enabled_filters: []
+  enabled_filters: ["F502N", "F657N", "F673N"]
   disabled_plane_ids: []
   export_multiplane_fits: true
 
@@ -41,25 +46,25 @@ tone:
   stretch:
     red:
       kind: asinh
-      parameter: 4.0
+      parameter: 5.0
     green:
       kind: asinh
-      parameter: 4.0
+      parameter: 4.5
     blue:
       kind: asinh
       parameter: 4.0
   percentiles:
-    black: 1.0
-    white: 99.5
+    black: 0.5
+    white: 99.7
   gain:
     red: 1.0
     green: 1.0
-    blue: 1.0
+    blue: 1.05
   bias:
     red: 0.0
     green: 0.0
     blue: 0.0
-  saturation: 1.0
+  saturation: 1.15
 
 psf:
   enabled: false

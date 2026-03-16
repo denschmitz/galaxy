@@ -29,6 +29,12 @@ class PipelineArtifacts:
     config_path: Path
 
 
+@dataclass(slots=True)
+class ReprojectionLoadResult:
+    planes: list[ReprojectedPlane]
+    diagnostics: dict[str, object]
+
+
 def run_pipeline(
     config: GalaxyConfig,
     workdir: str | Path,
@@ -50,19 +56,51 @@ def run_pipeline(
         if mode == "full" or mode == "download-only" or not cached_paths:
             if progress:
                 progress("Querying MAST archive")
-            search_result = query_archive(shape_kind, shape_kwargs, config.search)
+            search_result = query_archive(shape_kind, shape_kwargs, config.search, progress=progress)
+            if progress:
+                progress("Selecting deterministic product set")
             selected_products = select_products(search_result.products)
+            if progress:
+                progress(f"Selected {len(selected_products)} products for download")
+            if not selected_products:
+                raise RuntimeError(
+                    "archive query returned no selectable products; adjust mission/filter/product-type constraints or widen the search"
+                )
             manifest, skipped = download_products(selected_products, cache_dir, progress=progress)
             write_manifest(manifest, output_dir / "manifest.json")
             cached_paths = [Path(entry["local_path"]) for entry in manifest]
+            if progress:
+                progress(f"Downloaded or reused {len(cached_paths)} FITS files")
+            if not cached_paths:
+                first_reason = skipped[0]["reason"] if skipped else "none recorded"
+                raise RuntimeError(
+                    f"all selected product downloads failed or were skipped (selected={len(selected_products)}, skipped={len(skipped)}). "
+                    f"First failure: {first_reason}"
+                )
 
     if mode == "download-only":
         return _finalize_artifacts(output_dir)
 
     output_wcs, shape_out = build_output_wcs(config.canvas, resolved_target.coord)
-    reprojected = _load_or_build_reprojected(config, cached_paths, output_dir, reprojected_dir, output_wcs, shape_out, mode, progress)
+    reprojected_result = _load_or_build_reprojected(
+        config,
+        cached_paths,
+        output_dir,
+        reprojected_dir,
+        output_wcs,
+        shape_out,
+        mode,
+        progress,
+    )
+    reprojected = reprojected_result.planes
     if not reprojected:
-        raise RuntimeError("no usable planes were available for reprojection or composition")
+        diagnostics = reprojected_result.diagnostics
+        raise RuntimeError(
+            "no usable planes were available for reprojection or composition "
+            f"(cached_fits={diagnostics['cached_fits']}, loaded={diagnostics['loaded']}, "
+            f"filter_skipped={diagnostics['filter_skipped']}, load_failed={diagnostics['load_failed']}). "
+            f"First failure: {diagnostics['first_failure'] or 'none recorded'}"
+        )
 
     plane_records = build_plane_records(reprojected, set(config.planes.disabled_plane_ids))
     plane_arrays = {plane.plane_id: plane.data for plane in reprojected}
@@ -123,26 +161,67 @@ def _load_or_build_reprojected(
     shape_out: tuple[int, int],
     mode: str,
     progress: Callable[[str], None] | None,
-) -> list[ReprojectedPlane]:
+) -> ReprojectionLoadResult:
     exported_planes = output_dir / "exported_planes.fits"
     if mode == "compose-only" and exported_planes.exists():
-        return load_multiplane_records(exported_planes)
+        planes = load_multiplane_records(exported_planes)
+        return ReprojectionLoadResult(
+            planes=planes,
+            diagnostics={
+                "cached_fits": 0,
+                "loaded": len(planes),
+                "filter_skipped": 0,
+                "load_failed": 0,
+                "first_failure": None,
+            },
+        )
 
     fits_planes: list[FITSPlane] = []
+    filter_skipped = 0
+    load_failed = 0
+    first_failure: str | None = None
+
+    if progress:
+        progress(f"Loading cached FITS planes from {len(cached_paths)} files")
+
     for source_path in cached_paths:
         try:
             plane = load_fits_plane(source_path)
-            if config.planes.enabled_filters and str(plane.metadata.get("filter") or "") not in config.planes.enabled_filters:
+            plane_filter = str(plane.metadata.get("filter") or "")
+            if config.planes.enabled_filters and plane_filter not in config.planes.enabled_filters:
+                filter_skipped += 1
+                if progress:
+                    progress(f"Skipping {source_path.name}: filter '{plane_filter or 'unknown'}' not in enabled_filters")
                 continue
             fits_planes.append(plane)
-        except Exception:
+        except Exception as exc:
+            load_failed += 1
+            if first_failure is None:
+                first_failure = f"{source_path.name}: {exc}"
+            if progress:
+                progress(f"Skipping {source_path.name}: {exc}")
             if config.execution.fail_fast:
                 raise
+
+    if progress:
+        progress(
+            f"Loaded {len(fits_planes)} usable FITS planes "
+            f"(filter_skipped={filter_skipped}, load_failed={load_failed})"
+        )
 
     reprojected = reproject_all(fits_planes, output_wcs, shape_out, config.canvas.flux_conserving, progress=progress)
     for plane in reprojected:
         save_reprojected_plane(plane, output_wcs, reprojected_dir)
-    return reprojected
+    return ReprojectionLoadResult(
+        planes=reprojected,
+        diagnostics={
+            "cached_fits": len(cached_paths),
+            "loaded": len(fits_planes),
+            "filter_skipped": filter_skipped,
+            "load_failed": load_failed,
+            "first_failure": first_failure,
+        },
+    )
 
 
 def _reprojection_settings(config: GalaxyConfig, shape_out: tuple[int, int]) -> dict[str, object]:

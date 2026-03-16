@@ -1,6 +1,7 @@
 import pytest
 
-from galaxy.config import GalaxyConfig
+from galaxy.config import GalaxyConfig, TargetConfig
+from galaxy.targeting import resolve_target
 
 
 def test_config_validation_accepts_valid_document() -> None:
@@ -24,6 +25,21 @@ def test_config_validation_accepts_valid_document() -> None:
         }
     )
     assert config.target.name == "Orion Nebula"
+
+
+def test_target_resolution_prefers_explicit_coordinates_over_name() -> None:
+    target = TargetConfig.model_validate(
+        {
+            "name": "Pillars of Creation",
+            "ra_deg": 274.7003,
+            "dec_deg": -13.8067,
+            "region": {"kind": "circle", "radius_arcmin": 1.0},
+        }
+    )
+    resolved = resolve_target(target)
+    assert resolved.source == "explicit-decimal"
+    assert resolved.coord.ra.deg == pytest.approx(274.7003)
+    assert resolved.coord.dec.deg == pytest.approx(-13.8067)
 
 
 def test_config_validation_rejects_bad_percentiles() -> None:

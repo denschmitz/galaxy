@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Galaxy: Validate Orion Config",
+      "name": "Galaxy: Validate Pillars Config",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
@@ -15,11 +15,11 @@
       "args": [
         "validate-config",
         "--config",
-        "${workspaceFolder}/examples/orion.yaml"
+        "${workspaceFolder}/examples/pillars.yaml"
       ]
     },
     {
-      "name": "Galaxy: Run Orion Pipeline",
+      "name": "Galaxy: Run Pillars Pipeline",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
@@ -32,13 +32,13 @@
       "args": [
         "run",
         "--config",
-        "${workspaceFolder}/examples/orion.yaml",
+        "${workspaceFolder}/examples/pillars.yaml",
         "--workdir",
-        "${workspaceFolder}/artifacts/orion"
+        "${workspaceFolder}/artifacts/pillars"
       ]
     },
     {
-      "name": "Galaxy: Reproduce Orion",
+      "name": "Galaxy: Reproduce Pillars",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
@@ -51,13 +51,13 @@
       "args": [
         "reproduce",
         "--config",
-        "${workspaceFolder}/artifacts/orion/run_config.yaml",
+        "${workspaceFolder}/artifacts/pillars/run_config.yaml",
         "--workdir",
-        "${workspaceFolder}/artifacts/orion"
+        "${workspaceFolder}/artifacts/pillars"
       ]
     },
     {
-      "name": "Galaxy: Streamlit UI (Orion)",
+      "name": "Galaxy: Streamlit UI (Pillars)",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
@@ -71,7 +71,7 @@
         "run",
         "${workspaceFolder}/src/galaxy/ui.py",
         "--",
-        "${workspaceFolder}/artifacts/orion/exported_planes.fits"
+        "${workspaceFolder}/artifacts/pillars/exported_planes.fits"
       ]
     }
   ]

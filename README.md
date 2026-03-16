@@ -54,33 +54,33 @@ Notes:
 
 ## Quick start
 
-1. Review [`examples/orion.yaml`](/C:/Data/dev/galaxy/examples/orion.yaml).
+1. Review [`examples/pillars.yaml`](/C:/Data/dev/galaxy/examples/pillars.yaml).
 2. Validate the configuration:
 
 ```powershell
 $env:PYTHONPATH = "src"
-python -m galaxy.cli validate-config --config examples/orion.yaml
+python -m galaxy.cli validate-config --config examples/pillars.yaml
 ```
 
 3. Run the download and compose pipeline:
 
 ```powershell
 $env:PYTHONPATH = "src"
-python -m galaxy.cli run --config examples/orion.yaml --workdir artifacts/orion
+python -m galaxy.cli run --config examples/pillars.yaml --workdir artifacts/pillars
 ```
 
 4. Reproduce the same output later from the saved config and local cache:
 
 ```powershell
 $env:PYTHONPATH = "src"
-python -m galaxy.cli reproduce --config artifacts/orion/run_config.yaml --workdir artifacts/orion
+python -m galaxy.cli reproduce --config artifacts/pillars/run_config.yaml --workdir artifacts/pillars
 ```
 
 5. Launch the preview UI against the aligned plane export:
 
 ```powershell
 $env:PYTHONPATH = "src"
-python -m streamlit run src/galaxy/ui.py -- artifacts/orion/exported_planes.fits
+python -m streamlit run src/galaxy/ui.py -- artifacts/pillars/exported_planes.fits
 ```
 
 ## CLI overview
@@ -107,7 +107,7 @@ galaxy validate-config --config CONFIG.yaml
 Target override flags are supported for automation:
 
 ```powershell
-python -m galaxy.cli run --config CONFIG.yaml --target-name "Orion Nebula" --radius-arcmin 12 --workdir OUTPUT_DIR
+python -m galaxy.cli run --config CONFIG.yaml --target-name "Pillars of Creation" --box-arcmin 2.0 1.6 --workdir OUTPUT_DIR
 python -m galaxy.cli run --config CONFIG.yaml --ra 83.82208 --dec -5.39111 --box-arcmin 20 20 --workdir OUTPUT_DIR
 ```
 
@@ -137,7 +137,7 @@ Galaxy uses a single canonical YAML schema defined in [`src/galaxy/config.py`](/
 - PSF/deconvolution settings using Richardson-Lucy deconvolution with either a common Gaussian PSF or per-plane kernel FITS files
 - execution policy and output paths
 
-See [`examples/orion.yaml`](/C:/Data/dev/galaxy/examples/orion.yaml) and [`examples/tutorial.md`](/C:/Data/dev/galaxy/examples/tutorial.md).
+See [`examples/pillars.yaml`](/C:/Data/dev/galaxy/examples/pillars.yaml) and [`examples/tutorial.md`](/C:/Data/dev/galaxy/examples/tutorial.md).
 
 ## Output artifacts
 
@@ -172,3 +172,4 @@ python -m pytest
 ```
 
 Key design documentation lives in [`docs/design-requirements.md`](/C:/Data/dev/galaxy/docs/design-requirements.md).
+
