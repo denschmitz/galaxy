@@ -1,0 +1,78 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Galaxy: Validate Orion Config",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "galaxy.cli",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "args": [
+        "validate-config",
+        "--config",
+        "${workspaceFolder}/examples/orion.yaml"
+      ]
+    },
+    {
+      "name": "Galaxy: Run Orion Pipeline",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "galaxy.cli",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "args": [
+        "run",
+        "--config",
+        "${workspaceFolder}/examples/orion.yaml",
+        "--workdir",
+        "${workspaceFolder}/artifacts/orion"
+      ]
+    },
+    {
+      "name": "Galaxy: Reproduce Orion",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "galaxy.cli",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "args": [
+        "reproduce",
+        "--config",
+        "${workspaceFolder}/artifacts/orion/run_config.yaml",
+        "--workdir",
+        "${workspaceFolder}/artifacts/orion"
+      ]
+    },
+    {
+      "name": "Galaxy: Streamlit UI (Orion)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "streamlit",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "args": [
+        "run",
+        "${workspaceFolder}/src/galaxy/ui.py",
+        "--",
+        "${workspaceFolder}/artifacts/orion/exported_planes.fits"
+      ]
+    }
+  ]
+}

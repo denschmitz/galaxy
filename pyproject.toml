@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "galaxy"
+version = "0.1.0"
+description = "Presentation-oriented HST/JWST composite imaging pipeline"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+  { name = "Galaxy Contributors" }
+]
+dependencies = [
+  "astroquery==0.4.11",
+  "astropy==6.1.7",
+  "numpy==2.2.4",
+  "pydantic==2.11.2",
+  "PyYAML==6.0.2",
+  "reproject==0.15.0",
+  "requests==2.32.3",
+  "scipy==1.15.2",
+  "Pillow==11.1.0",
+  "tifffile==2025.2.18",
+  "streamlit==1.44.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.5",
+  "pytest-cov==6.0.0",
+]
+
+[project.scripts]
+galaxy = "galaxy.cli:main"
+galaxy-ui = "galaxy.ui:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
