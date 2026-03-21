@@ -1,0 +1,69 @@
+{
+  "generated_at": "2026-03-20T00:27:37.395050+00:00",
+  "config_path": null,
+  "selection_policy": "all",
+  "max_observations_per_filter": 1,
+  "selection_inputs": {
+    "include_filters": [],
+    "include_instruments": [],
+    "include_missions": [],
+    "include_obsids": [],
+    "exclude_obsids": [],
+    "include_products": [],
+    "exclude_products": [],
+    "strategy": null,
+    "max_per_filter": null,
+    "max_total": null
+  },
+  "candidates": [
+    {
+      "candidate_id": "cbde71986ce52d66",
+      "obsid": "1",
+      "obs_id": "A",
+      "product_filename": "masked.fits",
+      "data_uri": "mast:masked",
+      "mission": null,
+      "instrument": null,
+      "detector": null,
+      "product_type": "SCIENCE",
+      "product_version": null,
+      "observation_date_start": null,
+      "observation_date_end": null,
+      "exposure_time": null,
+      "file_size": null,
+      "proposal_id": null,
+      "proposal_title": null,
+      "target_name": "--",
+      "selection_rank": [
+        0,
+        0,
+        [
+          0
+        ],
+        "masked.fits"
+      ],
+      "auto_selected": true,
+      "auto_selection_reason": "selected:all",
+      "user_selected": null,
+      "selected": true,
+      "selected_reason": "selected:all",
+      "extra_metadata": {
+        "archive_ids": {
+          "obsid": "1",
+          "obs_id": "A"
+        },
+        "raw_product": {
+          "obsid": "1",
+          "obs_id": "A",
+          "filters": "F200W",
+          "productType": "SCIENCE",
+          "productFilename": "masked.fits",
+          "dataURI": "mast:masked",
+          "proposal_id": null,
+          "target_name": null
+        }
+      },
+      "filter": "F200W"
+    }
+  ]
+}

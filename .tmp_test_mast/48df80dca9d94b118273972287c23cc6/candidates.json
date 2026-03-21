@@ -1,0 +1,230 @@
+{
+  "generated_at": "2026-03-19T03:04:24.748697+00:00",
+  "config_path": "example.yaml",
+  "selection_policy": "latest_per_filter",
+  "max_observations_per_filter": 1,
+  "selection_inputs": {
+    "include_filters": [],
+    "include_instruments": [],
+    "include_missions": [],
+    "include_obsids": [],
+    "exclude_obsids": [],
+    "include_products": [],
+    "exclude_products": [],
+    "strategy": null,
+    "max_per_filter": null,
+    "max_total": 2
+  },
+  "candidates": [
+    {
+      "candidate_id": "c5a61b80be070f7d",
+      "obsid": "3",
+      "obs_id": "C",
+      "product_filename": "c.fits",
+      "data_uri": "mast:c",
+      "mission": "JWST",
+      "instrument": "NIRCAM",
+      "detector": null,
+      "product_type": "SCIENCE",
+      "product_version": null,
+      "observation_date_start": null,
+      "observation_date_end": "3.0",
+      "exposure_time": 200.0,
+      "file_size": null,
+      "proposal_id": null,
+      "proposal_title": null,
+      "target_name": null,
+      "selection_rank": [
+        0,
+        0,
+        [
+          0
+        ],
+        "c.fits"
+      ],
+      "auto_selected": true,
+      "auto_selection_reason": "selected:latest_per_filter",
+      "user_selected": null,
+      "selected": true,
+      "selected_reason": "selected:latest_per_filter",
+      "extra_metadata": {
+        "archive_ids": {
+          "obsid": "3",
+          "obs_id": "C"
+        },
+        "raw_product": {
+          "obsid": "3",
+          "obs_id": "C",
+          "filters": "F090W",
+          "productType": "SCIENCE",
+          "productFilename": "c.fits",
+          "_obs_t_max": 3.0,
+          "_obs_exptime": 200.0,
+          "_obs_collection": "JWST",
+          "_obs_instrument": "NIRCAM",
+          "dataURI": "mast:c"
+        }
+      },
+      "filter": "F090W"
+    },
+    {
+      "candidate_id": "64eafbdde4f01404",
+      "obsid": "1",
+      "obs_id": "A",
+      "product_filename": "a_v3.fits",
+      "data_uri": "mast:a_v3",
+      "mission": "JWST",
+      "instrument": "NIRCAM",
+      "detector": null,
+      "product_type": "SCIENCE",
+      "product_version": "v3",
+      "observation_date_start": null,
+      "observation_date_end": "1.0",
+      "exposure_time": 100.0,
+      "file_size": null,
+      "proposal_id": null,
+      "proposal_title": null,
+      "target_name": null,
+      "selection_rank": [
+        0,
+        0,
+        [
+          -3,
+          -3,
+          -3
+        ],
+        "a_v3.fits"
+      ],
+      "auto_selected": false,
+      "auto_selection_reason": "dropped:older_than_peer",
+      "user_selected": null,
+      "selected": false,
+      "selected_reason": "dropped:older_than_peer",
+      "extra_metadata": {
+        "archive_ids": {
+          "obsid": "1",
+          "obs_id": "A"
+        },
+        "raw_product": {
+          "obsid": "1",
+          "obs_id": "A",
+          "filters": "F200W",
+          "productType": "SCIENCE",
+          "productFilename": "a_v3.fits",
+          "productSubGroupDescription": "v3",
+          "_obs_t_max": 1.0,
+          "_obs_exptime": 100.0,
+          "_obs_collection": "JWST",
+          "_obs_instrument": "NIRCAM",
+          "dataURI": "mast:a_v3"
+        }
+      },
+      "filter": "F200W"
+    },
+    {
+      "candidate_id": "c7d9ebbfe75afdb5",
+      "obsid": "1",
+      "obs_id": "A",
+      "product_filename": "a_v1.fits",
+      "data_uri": "mast:a_v1",
+      "mission": "JWST",
+      "instrument": "NIRCAM",
+      "detector": null,
+      "product_type": "SCIENCE",
+      "product_version": "v1",
+      "observation_date_start": null,
+      "observation_date_end": "1.0",
+      "exposure_time": 100.0,
+      "file_size": null,
+      "proposal_id": null,
+      "proposal_title": null,
+      "target_name": null,
+      "selection_rank": [
+        0,
+        0,
+        [
+          -1,
+          -1,
+          -1
+        ],
+        "a_v1.fits"
+      ],
+      "auto_selected": false,
+      "auto_selection_reason": "dropped:lower_ranked_product_in_observation_filter",
+      "user_selected": null,
+      "selected": false,
+      "selected_reason": "dropped:lower_ranked_product_in_observation_filter",
+      "extra_metadata": {
+        "archive_ids": {
+          "obsid": "1",
+          "obs_id": "A"
+        },
+        "raw_product": {
+          "obsid": "1",
+          "obs_id": "A",
+          "filters": "F200W",
+          "productType": "SCIENCE",
+          "productFilename": "a_v1.fits",
+          "productSubGroupDescription": "v1",
+          "_obs_t_max": 1.0,
+          "_obs_exptime": 100.0,
+          "_obs_collection": "JWST",
+          "_obs_instrument": "NIRCAM",
+          "dataURI": "mast:a_v1"
+        }
+      },
+      "filter": "F200W"
+    },
+    {
+      "candidate_id": "51bc58a0a27b457a",
+      "obsid": "2",
+      "obs_id": "B",
+      "product_filename": "b.fits",
+      "data_uri": "mast:b",
+      "mission": "JWST",
+      "instrument": "NIRCAM",
+      "detector": null,
+      "product_type": "SCIENCE",
+      "product_version": null,
+      "observation_date_start": null,
+      "observation_date_end": "5.0",
+      "exposure_time": 300.0,
+      "file_size": null,
+      "proposal_id": null,
+      "proposal_title": null,
+      "target_name": null,
+      "selection_rank": [
+        0,
+        0,
+        [
+          0
+        ],
+        "b.fits"
+      ],
+      "auto_selected": true,
+      "auto_selection_reason": "selected:latest_per_filter",
+      "user_selected": null,
+      "selected": true,
+      "selected_reason": "selected:latest_per_filter",
+      "extra_metadata": {
+        "archive_ids": {
+          "obsid": "2",
+          "obs_id": "B"
+        },
+        "raw_product": {
+          "obsid": "2",
+          "obs_id": "B",
+          "filters": "F200W",
+          "productType": "SCIENCE",
+          "productFilename": "b.fits",
+          "_obs_t_max": 5.0,
+          "_obs_exptime": 300.0,
+          "_obs_collection": "JWST",
+          "_obs_instrument": "NIRCAM",
+          "dataURI": "mast:b"
+        }
+      },
+      "filter": "F200W"
+    }
+  ]
+}

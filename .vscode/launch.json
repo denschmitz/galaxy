@@ -19,7 +19,26 @@
       ]
     },
     {
-      "name": "Galaxy: Run Pillars Pipeline",
+      "name": "Galaxy: Discover Pillars Candidates",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "galaxy.cli",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "args": [
+        "discover",
+        "--config",
+        "${workspaceFolder}/examples/pillars.yaml",
+        "--out",
+        "${workspaceFolder}/artifacts/pillars/candidates.json"
+      ]
+    },
+    {
+      "name": "Galaxy: Run Pillars From Selection",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
@@ -34,7 +53,9 @@
         "--config",
         "${workspaceFolder}/examples/pillars.yaml",
         "--workdir",
-        "${workspaceFolder}/artifacts/pillars"
+        "${workspaceFolder}/artifacts/pillars",
+        "--selection",
+        "${workspaceFolder}/artifacts/pillars/candidates.json"
       ]
     },
     {
@@ -57,7 +78,25 @@
       ]
     },
     {
-      "name": "Galaxy: Streamlit UI (Pillars)",
+      "name": "Galaxy: Streamlit Discovery UI (Pillars)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "streamlit",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "args": [
+        "run",
+        "${workspaceFolder}/src/galaxy/ui.py",
+        "--",
+        "${workspaceFolder}/examples/pillars.yaml"
+      ]
+    },
+    {
+      "name": "Galaxy: Streamlit Preview UI (Pillars)",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
@@ -72,6 +111,31 @@
         "${workspaceFolder}/src/galaxy/ui.py",
         "--",
         "${workspaceFolder}/artifacts/pillars/exported_planes.fits"
+      ]
+    },
+    {
+      "name": "Galaxy: Production Requirement Tests",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "pytest",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "args": [
+        "-q",
+        "tests/test_cli.py",
+        "tests/test_config.py",
+        "tests/test_fitsio.py",
+        "tests/test_mast.py",
+        "tests/test_mapping_tone.py",
+        "tests/test_pipeline_modes.py",
+        "tests/test_planes_and_exports.py",
+        "tests/test_psf.py",
+        "tests/test_reprojection.py",
+        "tests/test_ui.py"
       ]
     }
   ]

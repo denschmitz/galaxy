@@ -14,6 +14,7 @@ import scipy
 
 from galaxy.config import GalaxyConfig
 from galaxy.planes import PlaneRecord
+from galaxy.selection import CandidateManifest
 from galaxy.targeting import ResolvedTarget
 
 
@@ -24,7 +25,30 @@ def build_provenance(
     skipped: list[dict[str, Any]],
     plane_records: list[PlaneRecord],
     reprojection_settings: dict[str, Any],
+    candidate_manifest: CandidateManifest | None = None,
+    execution_source: str = "raw_config_discovery",
 ) -> dict[str, Any]:
+    selection_section = {
+        "source": execution_source,
+        "policy": config.search.observation_selection,
+        "max_observations_per_filter": config.search.max_observations_per_filter,
+        "explicit_overrides": {},
+        "final_selected_candidate_ids": [],
+    }
+    if candidate_manifest is not None:
+        selection_section = {
+            "source": execution_source,
+            "policy": candidate_manifest.selection_policy,
+            "max_observations_per_filter": candidate_manifest.max_observations_per_filter,
+            "explicit_overrides": candidate_manifest.selection_inputs.to_dict(),
+            "final_selected_candidate_ids": [candidate.candidate_id for candidate in candidate_manifest.candidates if candidate.selected],
+            "candidate_manifest": {
+                "config_path": candidate_manifest.config_path,
+                "generated_at": candidate_manifest.generated_at,
+                "candidate_count": len(candidate_manifest.candidates),
+            },
+        }
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target": {
@@ -34,6 +58,7 @@ def build_provenance(
             "resolution_source": resolved_target.source,
             "region": resolved_target.region,
         },
+        "selection": selection_section,
         "source_files": manifest,
         "skipped_products": skipped,
         "planes": [asdict(record) for record in plane_records],

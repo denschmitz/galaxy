@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Callable
 
@@ -9,13 +10,27 @@ from galaxy.config import GalaxyConfig, dump_config
 from galaxy.export import export_png, export_tiff
 from galaxy.fitsio import FITSPlane, load_fits_plane
 from galaxy.mapping import CompositionInputs, compose_channels
-from galaxy.mast import download_products, query_archive, select_products
+from galaxy.mast import build_candidate_manifest, discover_candidates, download_selected, selection_summary
 from galaxy.planes import build_plane_records, export_multiplane_fits, load_multiplane_records
 from galaxy.provenance import build_provenance, write_provenance
 from galaxy.psf import apply_presentation_psf
-from galaxy.reprojection import ReprojectedPlane, build_output_wcs, reproject_all, save_reprojected_plane
+from galaxy.reprojection import (
+    MEMORY_WARNING_FRACTION,
+    REPROJECT_METHOD_ADAPTIVE_FLUX,
+    REPROJECT_METHOD_INTERPOLATION,
+    ReprojectedPlane,
+    build_output_wcs,
+    estimate_workspace_peak_bytes,
+    get_system_memory_bytes,
+    reproject_all,
+    save_reprojected_plane,
+)
+from galaxy.selection import CandidateManifest, SelectionInputs, write_candidate_manifest
 from galaxy.targeting import region_to_mast_shape, resolve_target
 from galaxy.tone import apply_tone
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -40,6 +55,10 @@ def run_pipeline(
     workdir: str | Path,
     mode: str = "full",
     progress: Callable[[str], None] | None = None,
+    *,
+    config_path: str | None = None,
+    selection_manifest: CandidateManifest | None = None,
+    selection_inputs: SelectionInputs | None = None,
 ) -> PipelineArtifacts:
     output_dir = ensure_directory(workdir)
     cache_dir = ensure_directory(output_dir / "cache")
@@ -48,25 +67,51 @@ def run_pipeline(
     resolved_target = resolve_target(config.target)
     shape_kind, shape_kwargs = region_to_mast_shape(config.target.region, resolved_target.coord)
 
+    candidate_manifest: CandidateManifest | None = None
+    execution_source = 'saved_candidate_manifest' if selection_manifest is not None else 'raw_config_discovery'
     manifest: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
     cached_paths: list[Path] = sorted(cache_dir.glob("*.fits*"))
 
     if mode in {"full", "download-only", "reproject-only"}:
-        if mode == "full" or mode == "download-only" or not cached_paths:
-            if progress:
-                progress("Querying MAST archive")
-            search_result = query_archive(shape_kind, shape_kwargs, config.search, progress=progress)
-            if progress:
-                progress("Selecting deterministic product set")
-            selected_products = select_products(search_result.products, config.search)
-            if progress:
-                progress(f"Selected {len(selected_products)} products for download")
-            if not selected_products:
-                raise RuntimeError(
-                    "archive query returned no selectable products; adjust mission/filter/product-type constraints or widen the search"
+        if mode in {"full", "download-only"} or not cached_paths:
+            if selection_manifest is None:
+                candidates = discover_candidates(shape_kind, shape_kwargs, config.search, progress=progress)
+                candidate_manifest = build_candidate_manifest(
+                    candidates,
+                    config.search,
+                    config_path=config_path,
+                    selection_inputs=selection_inputs,
                 )
-            manifest, skipped = download_products(selected_products, cache_dir, progress=progress)
+            else:
+                if progress:
+                    progress("Loaded candidate manifest for execution")
+                merged_inputs = _merge_selection_inputs(selection_manifest.selection_inputs, selection_inputs)
+                candidate_manifest = build_candidate_manifest(
+                    selection_manifest.candidates,
+                    config.search,
+                    config_path=selection_manifest.config_path or config_path,
+                    selection_inputs=merged_inputs,
+                )
+
+            write_candidate_manifest(candidate_manifest, output_dir / "candidates.json")
+            if progress:
+                progress(f"Candidate manifest write location: {output_dir / 'candidates.json'}")
+            summary = selection_summary(candidate_manifest.candidates)
+            if progress:
+                progress(f"Automatic selection result count: {summary['auto_selected_count']}")
+                progress(f"Final explicit selection result count: {summary['selected_count']}")
+                if summary["filters"]:
+                    progress(f"Available filters: {', '.join(summary['filters'])}")
+                if summary["instruments"]:
+                    progress(f"Available instruments: {', '.join(summary['instruments'])}")
+
+            selected_candidates = [candidate for candidate in candidate_manifest.candidates if candidate.selected]
+            if not selected_candidates:
+                raise RuntimeError(
+                    "archive discovery produced no selected candidates; adjust the selection policy, explicit overrides, or base search filters"
+                )
+            manifest, skipped = download_selected(candidate_manifest.candidates, cache_dir, progress=progress)
             write_manifest(manifest, output_dir / "manifest.json")
             cached_paths = [Path(entry["local_path"]) for entry in manifest]
             if progress:
@@ -74,21 +119,31 @@ def run_pipeline(
             if not cached_paths:
                 first_reason = skipped[0]["reason"] if skipped else "none recorded"
                 raise RuntimeError(
-                    f"all selected product downloads failed or were skipped (selected={len(selected_products)}, skipped={len(skipped)}). "
+                    f"all selected candidate downloads failed or were skipped (selected={len(selected_candidates)}, skipped={len(skipped)}). "
                     f"First failure: {first_reason}"
                 )
 
     if mode == "download-only":
+        provenance = build_provenance(
+            config,
+            resolved_target,
+            manifest,
+            skipped,
+            [],
+            {},
+            candidate_manifest,
+            execution_source,
+        )
+        write_provenance(provenance, output_dir / "provenance.json")
+        dump_config(config, output_dir / "run_config.yaml")
         return _finalize_artifacts(output_dir)
 
-    output_wcs, shape_out = build_output_wcs(config.canvas, resolved_target.coord)
     reprojected_result = _load_or_build_reprojected(
         config,
+        resolved_target.coord,
         cached_paths,
         output_dir,
         reprojected_dir,
-        output_wcs,
-        shape_out,
         mode,
         progress,
     )
@@ -118,7 +173,9 @@ def run_pipeline(
             manifest,
             skipped,
             plane_records,
-            _reprojection_settings(config, shape_out),
+            _reprojection_settings(reprojected_result.diagnostics),
+            candidate_manifest,
+            execution_source,
         )
         write_provenance(provenance, output_dir / "provenance.json")
         dump_config(config, output_dir / "run_config.yaml")
@@ -137,7 +194,9 @@ def run_pipeline(
         manifest,
         skipped,
         plane_records,
-        _reprojection_settings(config, shape_out),
+        _reprojection_settings(reprojected_result.diagnostics),
+        candidate_manifest,
+        execution_source,
     )
     write_provenance(provenance, output_dir / "provenance.json")
     dump_config(config, output_dir / "run_config.yaml")
@@ -154,11 +213,10 @@ def run_pipeline(
 
 def _load_or_build_reprojected(
     config: GalaxyConfig,
+    resolved_center,
     cached_paths: list[Path],
     output_dir: Path,
     reprojected_dir: Path,
-    output_wcs,
-    shape_out: tuple[int, int],
     mode: str,
     progress: Callable[[str], None] | None,
 ) -> ReprojectionLoadResult:
@@ -168,6 +226,12 @@ def _load_or_build_reprojected(
         return ReprojectionLoadResult(
             planes=planes,
             diagnostics={
+                "mode": "compose_only_export",
+                "reference_plane_id": None,
+                "expand_fraction": 0.10,
+                "pixel_scale_arcsec": None,
+                "width": planes[0].data.shape[1] if planes else 0,
+                "height": planes[0].data.shape[0] if planes else 0,
                 "cached_fits": 0,
                 "loaded": len(planes),
                 "filter_skipped": 0,
@@ -203,35 +267,113 @@ def _load_or_build_reprojected(
             if config.execution.fail_fast:
                 raise
 
+    diagnostics = {
+        "cached_fits": len(cached_paths),
+        "loaded": len(fits_planes),
+        "filter_skipped": filter_skipped,
+        "load_failed": load_failed,
+        "first_failure": first_failure,
+    }
+
     if progress:
         progress(
             f"Loaded {len(fits_planes)} usable FITS planes "
             f"(filter_skipped={filter_skipped}, load_failed={load_failed})"
         )
 
-    reprojected = reproject_all(fits_planes, output_wcs, shape_out, config.canvas.flux_conserving, progress=progress)
-    for plane in reprojected:
-        save_reprojected_plane(plane, output_wcs, reprojected_dir)
-    return ReprojectionLoadResult(
-        planes=reprojected,
-        diagnostics={
-            "cached_fits": len(cached_paths),
-            "loaded": len(fits_planes),
-            "filter_skipped": filter_skipped,
-            "load_failed": load_failed,
-            "first_failure": first_failure,
-        },
-    )
+    if not fits_planes:
+        return ReprojectionLoadResult(planes=[], diagnostics=diagnostics)
 
-
-def _reprojection_settings(config: GalaxyConfig, shape_out: tuple[int, int]) -> dict[str, object]:
-    return {
-        "projection": config.canvas.projection,
+    output_wcs, shape_out = build_output_wcs(config.canvas, resolved_center)
+    reprojection_method = REPROJECT_METHOD_ADAPTIVE_FLUX if config.canvas.flux_conserving else REPROJECT_METHOD_INTERPOLATION
+    reprojection_bytes_per_pixel = 16 if config.canvas.flux_conserving else 8
+    canvas_diag = {
+        "mode": "configured_canvas",
+        "reference_plane_id": None,
+        "expand_fraction": None,
         "pixel_scale_arcsec": config.canvas.pixel_scale_arcsec,
         "width": shape_out[1],
         "height": shape_out[0],
+        "projection": config.canvas.projection,
         "rotation_deg": config.canvas.rotation_deg,
+        "center_mode": config.canvas.center.mode,
+        "center_ra_deg": output_wcs.wcs.crval[0],
+        "center_dec_deg": output_wcs.wcs.crval[1],
         "flux_conserving": config.canvas.flux_conserving,
+        "reprojection_method": reprojection_method,
+        "reprojection_bytes_per_pixel": reprojection_bytes_per_pixel,
+    }
+    estimated_peak_bytes = estimate_workspace_peak_bytes(
+        shape_out[0] * shape_out[1],
+        len(fits_planes),
+        reprojection_bytes_per_pixel,
+        reprojection_method,
+    )
+    system_memory_bytes = get_system_memory_bytes()
+    canvas_diag.update({
+        "estimated_peak_bytes": estimated_peak_bytes,
+        "system_memory_bytes": system_memory_bytes,
+        "memory_warning_fraction": MEMORY_WARNING_FRACTION,
+    })
+    diagnostics.update(canvas_diag)
+    if progress:
+        progress(
+            f"Using configured canvas workspace {shape_out[1]}x{shape_out[0]} "
+            f"at {config.canvas.pixel_scale_arcsec:.3f} arcsec/pixel"
+        )
+    if system_memory_bytes is not None and estimated_peak_bytes >= int(system_memory_bytes * MEMORY_WARNING_FRACTION):
+        warning_message = (
+            "Warning: estimated reprojection working set is at or above "
+            f"{int(MEMORY_WARNING_FRACTION * 100)}% of system RAM "
+            f"({estimated_peak_bytes / (1024 ** 3):.1f} GiB estimated vs "
+            f"{system_memory_bytes / (1024 ** 3):.1f} GiB installed)."
+        )
+        logger.warning(warning_message)
+        if progress:
+            progress(warning_message)
+
+    reprojected = reproject_all(fits_planes, output_wcs, shape_out, config.canvas.flux_conserving, progress=progress)
+    for plane in reprojected:
+        save_reprojected_plane(plane, output_wcs, reprojected_dir)
+    return ReprojectionLoadResult(planes=reprojected, diagnostics=diagnostics)
+
+
+def _merge_selection_inputs(base: SelectionInputs, override: SelectionInputs | None) -> SelectionInputs:
+    if override is None:
+        return base
+    return SelectionInputs(
+        include_filters=set(base.include_filters) | set(override.include_filters),
+        include_instruments=set(base.include_instruments) | set(override.include_instruments),
+        include_missions=set(base.include_missions) | set(override.include_missions),
+        include_obsids=set(base.include_obsids) | set(override.include_obsids),
+        exclude_obsids=set(base.exclude_obsids) | set(override.exclude_obsids),
+        include_products=set(base.include_products) | set(override.include_products),
+        exclude_products=set(base.exclude_products) | set(override.exclude_products),
+        strategy=override.strategy or base.strategy,
+        max_per_filter=override.max_per_filter or base.max_per_filter,
+        max_total=override.max_total or base.max_total,
+    )
+
+
+def _reprojection_settings(diagnostics: dict[str, object]) -> dict[str, object]:
+    return {
+        "mode": diagnostics.get("mode"),
+        "reference_plane_id": diagnostics.get("reference_plane_id"),
+        "expand_fraction": diagnostics.get("expand_fraction"),
+        "pixel_scale_arcsec": diagnostics.get("pixel_scale_arcsec"),
+        "width": diagnostics.get("width"),
+        "height": diagnostics.get("height"),
+        "projection": diagnostics.get("projection"),
+        "rotation_deg": diagnostics.get("rotation_deg"),
+        "center_mode": diagnostics.get("center_mode"),
+        "center_ra_deg": diagnostics.get("center_ra_deg"),
+        "center_dec_deg": diagnostics.get("center_dec_deg"),
+        "flux_conserving": diagnostics.get("flux_conserving"),
+        "reprojection_method": diagnostics.get("reprojection_method"),
+        "reprojection_bytes_per_pixel": diagnostics.get("reprojection_bytes_per_pixel"),
+        "estimated_peak_bytes": diagnostics.get("estimated_peak_bytes"),
+        "system_memory_bytes": diagnostics.get("system_memory_bytes"),
+        "memory_warning_fraction": diagnostics.get("memory_warning_fraction"),
     }
 
 
@@ -245,4 +387,5 @@ def _finalize_artifacts(output_dir: Path) -> PipelineArtifacts:
         provenance_path=output_dir / "provenance.json",
         config_path=output_dir / "run_config.yaml",
     )
+
 

@@ -1,18 +1,20 @@
 target:
   name: Pillars of Creation
+  # Known approximate center of the Pillars of Creation.
   ra_deg: 274.7003
   dec_deg: -13.8067
   region:
+    # Sky search box in arcminutes. Edit these to change the crop on the sky.
     kind: box
-    width_arcmin: 2.0
-    height_arcmin: 1.6
+    width_arcmin: 1.5
+    height_arcmin: 1.5
 
 search:
-  missions: ["HST"]
+  missions: ["HST", "JWST"]
   instruments: []
   detectors: []
-  filters: ["F502N", "F657N", "F673N"]
-  product_types: ["SCIENCE", "DRZ", "DRC"]
+  filters: ["F090W", "F200W", "F444W", "F502N", "F657N", "F673N"]
+  product_types: ["SCIENCE", "DRZ", "DRC", "I2D"]
   observation_date_start: null
   observation_date_end: null
   observation_selection: deepest_per_filter
@@ -24,14 +26,15 @@ canvas:
     ra_deg: 274.7003
     dec_deg: -13.8067
   projection: TAN
+  # Output raster size. Edit width/height directly to change output resolution.
   pixel_scale_arcsec: 0.08
-  width: 1600
-  height: 1280
+  width: 5000
+  height: 5000
   rotation_deg: 0.0
   flux_conserving: true
 
 planes:
-  enabled_filters: ["F502N", "F657N", "F673N"]
+  enabled_filters: ["F090W", "F200W", "F444W", "F502N", "F657N", "F673N"]
   disabled_plane_ids: []
   export_multiplane_fits: true
 

@@ -1,0 +1,54 @@
+{
+  "generated_at": "2026-01-01T00:00:00+00:00",
+  "config_path": "C:\\Data\\dev\\galaxy\\.tmp_test_cli\\255a5f0cd58d4df2a37e93f1dbae985e\\config.yaml",
+  "selection_policy": "all",
+  "max_observations_per_filter": 1,
+  "selection_inputs": {
+    "include_filters": [],
+    "include_instruments": [],
+    "include_missions": [],
+    "include_obsids": [],
+    "exclude_obsids": [],
+    "include_products": [],
+    "exclude_products": [],
+    "strategy": null,
+    "max_per_filter": null,
+    "max_total": null
+  },
+  "candidates": [
+    {
+      "candidate_id": "cand-1",
+      "obsid": "1",
+      "obs_id": "OBS1",
+      "product_filename": "file.fits",
+      "data_uri": "mast:file",
+      "mission": "JWST",
+      "instrument": "NIRCAM",
+      "detector": "DET",
+      "product_type": "SCIENCE",
+      "product_version": "v1",
+      "observation_date_start": "1.0",
+      "observation_date_end": "2.0",
+      "exposure_time": 123.0,
+      "file_size": 456,
+      "proposal_id": "P1",
+      "proposal_title": "Title",
+      "target_name": "Target",
+      "selection_rank": [
+        0,
+        0,
+        [
+          0
+        ],
+        "file.fits"
+      ],
+      "auto_selected": false,
+      "auto_selection_reason": "dropped:not_evaluated",
+      "user_selected": true,
+      "selected": true,
+      "selected_reason": "selected:user_manifest",
+      "extra_metadata": {},
+      "filter": "F200W"
+    }
+  ]
+}

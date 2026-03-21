@@ -1,0 +1,26 @@
+target:
+  ra_deg: 10.0
+  dec_deg: 20.0
+  region:
+    kind: circle
+    radius_arcmin: 1.0
+canvas:
+  center:
+    mode: resolved_target
+  pixel_scale_arcsec: 0.2
+  width: 32
+  height: 32
+tone:
+  stretch:
+    red:
+      kind: asinh
+      parameter: 4.0
+    green:
+      kind: asinh
+      parameter: 4.0
+    blue:
+      kind: asinh
+      parameter: 4.0
+  percentiles:
+    black: 1.0
+    white: 99.5

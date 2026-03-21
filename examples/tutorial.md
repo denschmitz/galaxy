@@ -32,7 +32,7 @@ python -m galaxy.cli validate-config --config examples/pillars.yaml
 
 ## 3. Run the full pipeline
 
-This example is intentionally narrow: it targets a modest crop of the Pillars of Creation with HST narrowband filters so the archive query stays practical.
+This example uses a 1.5 x 1.5 arcmin square centered on the Pillars of Creation and renders to a 5000 x 5000 output canvas.
 
 ```powershell
 $env:PYTHONPATH = "src"
