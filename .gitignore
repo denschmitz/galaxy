@@ -11,4 +11,7 @@ cache/
 *.pyo
 *.pyd
 *.egg-info/
-
+.tmp_test_mast/
+.tmp_test_ui/
+.tmp_test_psf
+.tmp_pytest/
