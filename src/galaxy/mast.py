@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import logging
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -10,6 +11,7 @@ from astroquery.mast import Observations
 
 from galaxy.cache import sha256_file
 from galaxy.config import SearchConfig
+from galaxy.logging_utils import emit_log
 from galaxy.selection import CandidateManifest, CandidateRecord, SelectionInputs
 
 
@@ -22,6 +24,7 @@ PRODUCT_TYPE_PRIORITY = {
 }
 PRODUCT_LIST_BATCH_SIZE = 64
 NON_DISPLAY_FILTERS = {"BLANK", "DETECTION", "MIRVIS"}
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -220,16 +223,18 @@ def download_selected(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     manifest: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    for candidate in [item for item in candidates if item.selected]:
+    selected_candidates = [item for item in candidates if item.selected]
+    emit_log(logger, logging.INFO, f"Download queue contains {len(selected_candidates)} selected products", progress)
+    for candidate in selected_candidates:
         filename = str(candidate.product_filename or candidate.data_uri or "unknown.fits").split("/")[-1]
         uri = str(candidate.data_uri or "")
         destination = cache_dir / filename
-        if progress:
-            progress(f"Download start: {filename}")
+        emit_log(logger, logging.INFO, f"Download start: {filename}", progress)
         try:
             status, msg, url = Observations.download_file(uri, local_path=destination, cache=True, verbose=False)
             if status == "ERROR":
                 raise RuntimeError(msg or "MAST download failed")
+            emit_log(logger, logging.INFO, f"Download complete: {filename}", progress)
             manifest.append(
                 {
                     "candidate_id": candidate.candidate_id,
@@ -250,6 +255,7 @@ def download_selected(
                 }
             )
         except Exception as exc:  # pragma: no cover
+            emit_log(logger, logging.ERROR, f"Download failed for {filename}: {exc}", progress)
             skipped.append(
                 {
                     "candidate_id": candidate.candidate_id,
@@ -259,8 +265,6 @@ def download_selected(
                     "reason": str(exc),
                 }
             )
-            if progress:
-                progress(f"Download failed for {filename}: {exc}")
     return manifest, skipped
 
 
@@ -287,8 +291,7 @@ def _query_archive_rows(
     if shape_kind != "circle":
         raise ValueError(f"MAST discovery currently supports circle queries only; received {shape_kind}")
 
-    if progress:
-        progress(f"Archive query start: {shape_kind} region")
+    emit_log(logger, logging.INFO, f"Archive query start: {shape_kind} region", progress)
 
     observations = Observations.query_region(
         f"{shape_kwargs['ra']} {shape_kwargs['dec']}",
@@ -296,34 +299,33 @@ def _query_archive_rows(
     )
 
     obs_rows = [dict(row) for row in observations]
-    if progress:
-        progress(f"Raw observation count: {len(obs_rows)}")
+    emit_log(logger, logging.INFO, f"Raw observation count: {len(obs_rows)}", progress)
     obs_rows = filter_observations(obs_rows, search)
-    if progress:
-        progress(f"Post-filter observation count: {len(obs_rows)}")
+    emit_log(logger, logging.INFO, f"Post-filter observation count: {len(obs_rows)}", progress)
 
     if not obs_rows:
         return [], []
 
     observation_metadata = _build_observation_metadata(obs_rows)
     observation_ids = list(dict.fromkeys(observation_metadata))
-    if progress:
-        progress(f"Product-batch fetch start: {len(observation_ids)} observations in batches of {PRODUCT_LIST_BATCH_SIZE}")
+    emit_log(
+        logger,
+        logging.INFO,
+        f"Product-batch fetch start: {len(observation_ids)} observations in batches of {PRODUCT_LIST_BATCH_SIZE}",
+        progress,
+    )
 
     product_rows: list[dict[str, Any]] = []
     batches = _batched(observation_ids, PRODUCT_LIST_BATCH_SIZE)
     for index, batch in enumerate(batches, start=1):
-        if progress:
-            progress(f"Product-batch fetch progress: {index}/{len(batches)} ({len(batch)} observations)")
+        emit_log(logger, logging.INFO, f"Product-batch fetch progress: {index}/{len(batches)} ({len(batch)} observations)", progress)
         products = Observations.get_product_list(batch)
         product_rows.extend(dict(row) for row in products)
 
-    if progress:
-        progress(f"Raw product count: {len(product_rows)}")
+    emit_log(logger, logging.INFO, f"Raw product count: {len(product_rows)}", progress)
     product_rows = _enrich_products(product_rows, observation_metadata)
     product_rows = filter_products(product_rows, search)
-    if progress:
-        progress(f"Post-filter product count: {len(product_rows)}")
+    emit_log(logger, logging.INFO, f"Post-filter product count: {len(product_rows)}", progress)
     return obs_rows, product_rows
 
 

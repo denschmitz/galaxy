@@ -7,6 +7,10 @@ import numpy as np
 from scipy.signal import convolve2d
 
 from galaxy.config import PSFConfig
+from galaxy.fitsio import FITSPlane
+
+
+DECONVOLVED_SUFFIX = "__deconvolved"
 
 
 def apply_presentation_psf(planes: dict[str, np.ndarray], psf: PSFConfig) -> dict[str, np.ndarray]:
@@ -32,6 +36,47 @@ def apply_presentation_psf(planes: dict[str, np.ndarray], psf: PSFConfig) -> dic
     return processed
 
 
+def build_deconvolved_plane_artifacts(planes: list[FITSPlane], psf: PSFConfig, cache_dir: Path) -> list[FITSPlane]:
+    if not psf.enabled:
+        return []
+
+    resolved = {plane.plane_id: _resolve_kernel_spec(plane.plane_id, psf) for plane in planes}
+    missing = [plane.plane_id for plane in planes if resolved[plane.plane_id] is None]
+    if missing:
+        raise ValueError(
+            "psf.enabled requires a valid kernel for every plane in the deconvolved branch; "
+            f"missing kernels for: {', '.join(sorted(missing))}"
+        )
+
+    processed_planes: list[FITSPlane] = []
+    for plane in planes:
+        spec = resolved[plane.plane_id]
+        assert spec is not None
+        processed = _richardson_lucy(
+            np.asarray(plane.data, dtype=np.float32),
+            spec["kernel"],
+            iterations=spec["iterations"],
+            regularization=spec["regularization"],
+        )
+        source_path = Path(str(plane.metadata.get("source_path") or cache_dir / f"{plane.plane_id}.fits"))
+        destination = cache_dir / f"{source_path.stem}{DECONVOLVED_SUFFIX}.fits"
+        metadata = dict(plane.metadata)
+        metadata["artifact_branch"] = "deconvolved"
+        metadata["original_source_path"] = str(source_path)
+        metadata["source_path"] = str(destination)
+        _write_plane_artifact(destination, processed, plane)
+        processed_planes.append(
+            FITSPlane(
+                plane_id=plane.plane_id,
+                data=processed,
+                wcs=plane.wcs.deepcopy(),
+                metadata=metadata,
+                mask=None if plane.mask is None else np.asarray(plane.mask, dtype=bool),
+            )
+        )
+    return processed_planes
+
+
 def _resolve_kernel_spec(plane_name: str, psf: PSFConfig) -> dict[str, object] | None:
     plane_config = psf.per_plane.get(plane_name)
     if plane_config is not None and not plane_config.enabled:
@@ -53,6 +98,28 @@ def _resolve_kernel_spec(plane_name: str, psf: PSFConfig) -> dict[str, object] |
         "iterations": plane_config.max_iterations if plane_config is not None else 10,
         "regularization": plane_config.regularization if plane_config is not None else 0.0,
     }
+
+
+def _write_plane_artifact(path: Path, data: np.ndarray, plane: FITSPlane) -> None:
+    header = plane.wcs.to_header()
+    metadata = dict(plane.metadata)
+    if metadata.get("filter") is not None:
+        header["FILTER"] = str(metadata["filter"])
+    if metadata.get("instrument") is not None:
+        header["INSTRUME"] = str(metadata["instrument"])
+    if metadata.get("detector") is not None:
+        header["DETECTOR"] = str(metadata["detector"])
+    if metadata.get("mission") is not None:
+        header["TELESCOP"] = str(metadata["mission"])
+    if metadata.get("observation_id") is not None:
+        header["OBS_ID"] = str(metadata["observation_id"])
+    if metadata.get("exposure_time") is not None:
+        try:
+            header["EXPTIME"] = float(metadata["exposure_time"])
+        except (TypeError, ValueError):
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fits.PrimaryHDU(data=np.asarray(data, dtype=np.float32), header=header).writeto(path, overwrite=True)
 
 
 def _load_kernel(path: Path) -> np.ndarray:

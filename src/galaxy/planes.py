@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from astropy.io import fits
+from astropy.wcs import WCS
 import numpy as np
 
 from galaxy.reprojection import ReprojectedPlane
@@ -17,10 +18,11 @@ class PlaneRecord:
     filter_name: str | None
     exposure_time: float | None
     observation_id: str | None
+    artifact_branch: str | None = "original"
     enabled: bool = True
 
 
-def build_plane_records(planes: list[ReprojectedPlane], disabled_plane_ids: set[str]) -> list[PlaneRecord]:
+def build_plane_records(planes: list[ReprojectedPlane], disabled_plane_ids: set[str], artifact_branch: str = "original") -> list[PlaneRecord]:
     return [
         PlaneRecord(
             plane_id=plane.plane_id,
@@ -29,16 +31,21 @@ def build_plane_records(planes: list[ReprojectedPlane], disabled_plane_ids: set[
             filter_name=_string_or_none(plane.metadata.get("filter")),
             exposure_time=_float_or_none(plane.metadata.get("exposure_time")),
             observation_id=_string_or_none(plane.metadata.get("observation_id")),
+            artifact_branch=_string_or_none(plane.metadata.get("artifact_branch")) or artifact_branch,
             enabled=plane.plane_id not in disabled_plane_ids,
         )
         for plane in planes
     ]
 
 
-def export_multiplane_fits(planes: list[ReprojectedPlane], output_path: str | Path) -> Path:
+def export_multiplane_fits(
+    planes: list[ReprojectedPlane],
+    output_path: str | Path,
+    output_wcs: WCS | None = None,
+) -> Path:
     hdus: list[fits.ImageHDU | fits.PrimaryHDU] = [fits.PrimaryHDU()]
     for plane in planes:
-        header = fits.Header()
+        header = output_wcs.to_header() if output_wcs is not None else fits.Header()
         _populate_plane_header(header, plane)
         hdus.append(fits.ImageHDU(data=np.asarray(plane.data, dtype=np.float32), header=header, name=plane.plane_id[:68]))
     destination = Path(output_path)
@@ -102,6 +109,8 @@ def _populate_plane_header(header: fits.Header, plane: ReprojectedPlane) -> None
         header["DETECTOR"] = str(metadata["detector"])
     if metadata.get("observation_id") is not None:
         header["OBS_ID"] = str(metadata["observation_id"])
+    if metadata.get("artifact_branch") is not None:
+        header["BRANCH"] = str(metadata["artifact_branch"])
     if metadata.get("exposure_time") is not None:
         try:
             header["EXPTIME"] = float(metadata["exposure_time"])
@@ -117,5 +126,11 @@ def _metadata_from_header(header: fits.Header, plane_id: str) -> dict[str, objec
         "instrument": header.get("INSTRUME"),
         "detector": header.get("DETECTOR"),
         "observation_id": header.get("OBS_ID"),
+        "artifact_branch": header.get("BRANCH"),
         "exposure_time": header.get("EXPTIME"),
+        "header_subset": {
+            key: header.get(key)
+            for key in ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", "CD1_1", "CD1_2", "CD2_1", "CD2_2"]
+            if key in header
+        },
     }

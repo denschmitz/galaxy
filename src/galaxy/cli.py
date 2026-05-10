@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 import sys
 
 from galaxy.config import BoxRegion, CircleRegion, GalaxyConfig, load_config
+from galaxy.logging_utils import DEFAULT_LOG_FILE_NAME, configure_logging
 from galaxy.mast import build_candidate_manifest, discover_candidates, selection_summary
 from galaxy.pipeline import run_pipeline
 from galaxy.selection import SelectionInputs, load_candidate_manifest, write_candidate_manifest
 from galaxy.targeting import region_to_mast_shape, resolve_target
+
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,24 +73,35 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    _configure_initial_logging(args)
+
     if args.command == "validate-config":
-        load_config(args.config)
+        config = load_config(args.config)
+        _configure_runtime_logging(config, config_path=Path(args.config))
+        logger.info("Configuration is valid: %s", args.config)
         print(f"Configuration is valid: {args.config}")
         return 0
 
     if args.command == "reproduce":
         config = load_config(args.config)
-        artifacts = run_pipeline(config, args.workdir, mode=args.mode, progress=lambda message: print(message), config_path=args.config)
+        _configure_runtime_logging(config, config_path=Path(args.config), workdir=Path(args.workdir))
+        artifacts = run_pipeline(config, args.workdir, mode=args.mode, config_path=args.config)
+        logger.info("Artifacts written to %s", artifacts.workdir)
         print(f"Artifacts written to {artifacts.workdir}")
         return 0
 
     config = load_config(args.config)
     config = _apply_cli_overrides(config, args)
+    if args.command == "discover":
+        _configure_runtime_logging(config, config_path=Path(args.config), out_path=Path(args.out))
+    else:
+        _configure_runtime_logging(config, config_path=Path(args.config), workdir=Path(args.workdir))
     selection_inputs = _selection_inputs_from_args(args)
 
     if args.command == "discover":
-        manifest = _discover_manifest(config, args.config, selection_inputs, progress=lambda message: print(message))
+        manifest = _discover_manifest(config, args.config, selection_inputs)
         write_candidate_manifest(manifest, args.out)
+        logger.info("Candidates written to %s", args.out)
         _print_discovery_summary(manifest)
         print(f"Candidates written to {args.out}")
         return 0
@@ -99,37 +115,69 @@ def main(argv: list[str] | None = None) -> int:
             config,
             args.workdir,
             mode=args.mode,
-            progress=lambda message: print(message),
             config_path=args.config,
             selection_manifest=manifest,
             selection_inputs=selection_inputs,
         )
     else:
         if args.list_filters or args.list_instruments:
-            manifest = _discover_manifest(config, args.config, selection_inputs, progress=lambda message: print(message))
+            manifest = _discover_manifest(config, args.config, selection_inputs)
             _print_discovery_summary(manifest)
             return 0
         artifacts = run_pipeline(
             config,
             args.workdir,
             mode=args.mode,
-            progress=lambda message: print(message),
             config_path=args.config,
             selection_inputs=selection_inputs,
         )
+    logger.info("Artifacts written to %s", artifacts.workdir)
     print(f"Artifacts written to {artifacts.workdir}")
     return 0
+
+
+def _configure_initial_logging(args: argparse.Namespace) -> None:
+    if args.command == "discover":
+        log_dir = Path(args.out).parent
+    elif args.command == "run":
+        log_dir = Path(args.workdir)
+    elif args.command == "reproduce":
+        log_dir = Path(args.workdir)
+    else:
+        log_dir = Path(args.config).parent
+    configure_logging(log_path=log_dir / DEFAULT_LOG_FILE_NAME)
+
+
+def _configure_runtime_logging(
+    config: GalaxyConfig,
+    *,
+    config_path: Path,
+    workdir: Path | None = None,
+    out_path: Path | None = None,
+) -> None:
+    if workdir is not None:
+        log_dir = workdir
+    elif out_path is not None:
+        log_dir = out_path.parent
+    else:
+        log_dir = config_path.parent
+    configure_logging(
+        log_path=log_dir / config.execution.log_file,
+        debug_to_console=config.execution.debug_to_console,
+        debug_to_file=config.execution.debug_to_file,
+    )
 
 
 def _discover_manifest(
     config: GalaxyConfig,
     config_path: str,
     selection_inputs: SelectionInputs,
-    progress,
 ):
+    if config.target is None:
+        raise RuntimeError("discover requires a target-defined search scene")
     resolved_target = resolve_target(config.target)
     shape_kind, shape_kwargs = region_to_mast_shape(config.target.region, resolved_target.coord)
-    candidates = discover_candidates(shape_kind, shape_kwargs, config.search, progress=progress)
+    candidates = discover_candidates(shape_kind, shape_kwargs, config.search)
     return build_candidate_manifest(candidates, config.search, config_path=config_path, selection_inputs=selection_inputs)
 
 
@@ -165,6 +213,8 @@ def _print_discovery_summary(manifest) -> None:
 
 
 def _apply_cli_overrides(config: GalaxyConfig, args: argparse.Namespace) -> GalaxyConfig:
+    if config.target is None:
+        raise RuntimeError("CLI overrides require a target-defined project")
     target = config.target.model_copy(deep=True)
     if args.target_name:
         target.name = args.target_name
