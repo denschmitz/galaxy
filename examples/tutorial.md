@@ -48,7 +48,7 @@ Expected artifacts:
 - `artifacts/pillars/composite.png`
 - `artifacts/pillars/composite.tiff`
 - `artifacts/pillars/provenance.json`
-- `artifacts/pillars/run_config.yaml`
+- `artifacts/pillars/project.yaml`
 
 ## 4. Tune interactively
 
@@ -59,13 +59,13 @@ $env:PYTHONPATH = "src"
 python -m streamlit run src/galaxy/ui.py -- artifacts/pillars/exported_planes.fits
 ```
 
-Use the sidebar controls to toggle planes, adjust RGB weights, change percentiles, and save or load a reusable style file.
+Use the sidebar controls to toggle planes, adjust per-plane RGB mixes, change percentiles, save or load a reusable style file, and write an updated Galaxy project YAML.
 
 ## 5. Reproduce the result
 
 ```powershell
 $env:PYTHONPATH = "src"
-python -m galaxy.cli reproduce --config artifacts/pillars/run_config.yaml --workdir artifacts/pillars
+python -m galaxy.cli reproduce --config artifacts/pillars/project.yaml --workdir artifacts/pillars
 ```
 
 ## 6. Optional installed console scripts
@@ -75,7 +75,8 @@ After `python -m pip install -e .`, setuptools should also create these shortcut
 ```powershell
 galaxy validate-config --config examples/pillars.yaml
 galaxy run --config examples/pillars.yaml --workdir artifacts/pillars
-galaxy reproduce --config artifacts/pillars/run_config.yaml --workdir artifacts/pillars
+galaxy reproduce --config artifacts/pillars/project.yaml --workdir artifacts/pillars
 ```
 
 If those scripts are not on `PATH`, keep using the `python -m galaxy.cli ...` form above.
+

@@ -1,0 +1,93 @@
+target:
+  name: S305 offset
+  # Center taken from the post's CRVAL values.
+  ra_deg: 112.532817
+  dec_deg: -18.558079
+  region:
+    # Approximate crop for a social-media style framing around the posted field.
+    kind: box
+    width_arcmin: 3.0
+    height_arcmin: 3.0
+
+search:
+  missions: ["JWST"]
+  instruments: ["NIRCAM"]
+  detectors: []
+  # The post's "444, 300, 140" shorthand is treated here as the archive filters
+  # F444W, F300M, and F140M.
+  filters: ["F140M", "F300M", "F444W"]
+  product_types: ["SCIENCE", "I2D"]
+  observation_date_start: null
+  observation_date_end: null
+  observation_selection: latest_per_filter
+  max_observations_per_filter: 1
+
+canvas:
+  center:
+    mode: explicit
+    ra_deg: 112.532817
+    dec_deg: -18.558079
+  projection: TAN
+  pixel_scale_arcsec: 0.04
+  width: 4500
+  height: 4500
+  rotation_deg: 0.0
+  flux_conserving: true
+
+planes:
+  enabled_filters: ["F140M", "F300M", "F444W"]
+  disabled_plane_ids: []
+  export_multiplane_fits: true
+
+mapping:
+  defaults:
+    strategy: continuum
+  # This example shows the compressed-continuum workflow. Each plane gets an RGB
+  # mix that places long wavelengths toward red, short wavelengths toward blue,
+  # and middle wavelengths in between. For a simple three-plane set this can be
+  # a clean R/G/B split; for larger sets you can distribute colors gradually.
+  planes:
+    - filter: F444W
+      label: long_wave_dust
+      rgb: {red: 1.00, green: 0.18, blue: 0.00}
+    - filter: F300M
+      label: mid_wave_structure
+      rgb: {red: 0.25, green: 0.95, blue: 0.15}
+    - filter: F140M
+      label: short_wave_stars
+      rgb: {red: 0.00, green: 0.28, blue: 1.00}
+  derived_planes: []
+
+tone:
+  stretch:
+    red:
+      kind: asinh
+      parameter: 5.0
+    green:
+      kind: asinh
+      parameter: 4.5
+    blue:
+      kind: asinh
+      parameter: 4.0
+  percentiles:
+    black: 0.5
+    white: 99.7
+  gain:
+    red: 1.0
+    green: 1.0
+    blue: 1.05
+  bias:
+    red: 0.0
+    green: 0.0
+    blue: 0.0
+  saturation: 1.15
+
+psf:
+  enabled: false
+  common_psf_fwhm_arcsec: null
+  per_plane: {}
+
+execution:
+  fail_fast: false
+
+

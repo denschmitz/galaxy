@@ -8,7 +8,7 @@ import astropy.units as u
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from galaxy.config import ExecutionConfig, GalaxyConfig
+from galaxy.config import ExecutionConfig, GalaxyConfig, PSFConfig
 from galaxy.fitsio import FITSPlane
 from galaxy.pipeline import _load_or_build_reprojected, run_pipeline
 from galaxy.reprojection import REPROJECT_METHOD_INTERPOLATION, ReprojectedPlane, estimate_workspace_peak_bytes
@@ -28,11 +28,9 @@ def _base_config() -> GalaxyConfig:
                 "flux_conserving": False,
             },
             "mapping": {
-                "channels": {
-                    "red": [{"plane": "plane_a", "weight": 1.0}],
-                    "green": [{"plane": "plane_a", "weight": 1.0}],
-                    "blue": [{"plane": "plane_a", "weight": 1.0}],
-                }
+                "planes": [
+                    {"plane": "plane_a", "rgb": {"red": 1.0, "green": 1.0, "blue": 1.0}}
+                ]
             },
             "tone": {
                 "stretch": {
@@ -134,6 +132,8 @@ def test_run_pipeline_download_only_writes_manifest_candidates_and_provenance(mo
     candidates = load_candidate_manifest(tmp_path / "candidates.json")
 
     assert artifacts.config_path.exists()
+    assert artifacts.footprint_overlay_path is None
+    assert not (tmp_path / "run_config.yaml").exists()
     assert manifest[0]["candidate_id"] == "cand-1"
     assert candidates.candidates[0].selected is True
     assert provenance["selection"]["source"] == "raw_config_discovery"
@@ -150,7 +150,10 @@ def test_run_pipeline_compose_only_uses_exported_planes(tmp_path) -> None:
 
     assert artifacts.png_path is not None and artifacts.png_path.exists()
     assert artifacts.tiff_path is not None and artifacts.tiff_path.exists()
+    assert artifacts.footprint_overlay_path is not None and artifacts.footprint_overlay_path.exists()
     assert provenance["reprojection"]["mode"] == "compose_only_export"
+    assert artifacts.config_path.name == "project.yaml"
+    assert not (tmp_path / "run_config.yaml").exists()
 
 
 def test_run_pipeline_raises_when_no_selected_candidates(monkeypatch, tmp_path) -> None:
@@ -187,12 +190,14 @@ def test_load_or_build_reprojected_continues_past_bad_files_when_fail_fast_disab
         SkyCoord(10 * u.deg, 20 * u.deg),
         [good, bad],
         tmp_path,
+        tmp_path,
         tmp_path / "reprojected",
         "full",
         progress=None,
     )
 
-    assert len(result.planes) == 1
+    assert len(result.original_planes) == 1
+    assert result.deconvolved_planes == []
     assert result.diagnostics["load_failed"] == 1
     assert result.diagnostics["first_failure"] == "bad.fits: corrupt"
     assert result.diagnostics["mode"] == "configured_canvas"
@@ -215,6 +220,7 @@ def test_load_or_build_reprojected_raises_when_fail_fast_enabled(monkeypatch, tm
             config,
             SkyCoord(10 * u.deg, 20 * u.deg),
             [source],
+            tmp_path,
             tmp_path,
             tmp_path / "reprojected",
             "full",
@@ -248,6 +254,7 @@ def test_load_or_build_reprojected_warns_when_estimate_exceeds_80_percent_ram(mo
         config,
         SkyCoord(10 * u.deg, 20 * u.deg),
         [source],
+        tmp_path,
         tmp_path,
         tmp_path / "reprojected",
         "full",
@@ -292,6 +299,7 @@ def test_load_or_build_reprojected_logs_warning_without_progress_callback(monkey
             SkyCoord(10 * u.deg, 20 * u.deg),
             [source],
             tmp_path,
+            tmp_path,
             tmp_path / "reprojected",
             "full",
             progress=None,
@@ -328,6 +336,7 @@ def test_load_or_build_reprojected_records_full_configured_canvas_provenance(mon
         SkyCoord(10 * u.deg, 20 * u.deg),
         [good],
         tmp_path,
+        tmp_path,
         tmp_path / "reprojected",
         "full",
         progress=None,
@@ -339,3 +348,69 @@ def test_load_or_build_reprojected_records_full_configured_canvas_provenance(mon
     assert result.diagnostics["flux_conserving"] == config.canvas.flux_conserving
     assert result.diagnostics["reprojection_method"] == REPROJECT_METHOD_INTERPOLATION
     assert result.diagnostics["reprojection_bytes_per_pixel"] == 8
+
+
+def test_run_pipeline_with_psf_exports_original_and_deconvolved_branches(monkeypatch, tmp_path) -> None:
+    config = _base_config().model_copy(update={
+        "psf": PSFConfig(enabled=True, common_psf_fwhm_arcsec=2.0),
+    })
+
+    monkeypatch.setattr("galaxy.pipeline.discover_candidates", lambda *args, **kwargs: [_candidate(selected=True)])
+
+    def fake_download_selected(candidates, cache_dir, progress=None):
+        destination = cache_dir / "plane_a.fits"
+        fits.PrimaryHDU(data=np.ones((8, 8), dtype=np.float32)).writeto(destination)
+        return (
+            [
+                {
+                    "candidate_id": candidates[0].candidate_id,
+                    "product_identifier": "OBS1",
+                    "stable_product_identifier": "plane_a.fits",
+                    "product_filename": "plane_a.fits",
+                    "filter": "F200W",
+                    "product_type": "SCIENCE",
+                    "product_version": "v1",
+                    "selection_rank": [0, 0, [0], "plane_a.fits"],
+                    "selected_reason": "selected:latest_per_filter",
+                    "url": "mast:plane_a",
+                    "local_path": str(destination),
+                    "file_size": destination.stat().st_size,
+                    "checksum": "abc123",
+                    "download_timestamp": None,
+                    "status": "complete",
+                }
+            ],
+            [],
+        )
+
+    monkeypatch.setattr("galaxy.pipeline.download_selected", fake_download_selected)
+
+    def fake_load_fits_plane(path: Path) -> FITSPlane:
+        return FITSPlane(
+            "plane_a",
+            np.ones((8, 8), dtype=np.float32),
+            _simple_wcs(),
+            {
+                "source_path": str(path),
+                "filter": "F200W",
+                "mission": "JWST",
+                "instrument": "NIRCAM",
+                "observation_id": "OBS1",
+                "exposure_time": 123.0,
+            },
+        )
+
+    monkeypatch.setattr("galaxy.pipeline.load_fits_plane", fake_load_fits_plane)
+
+    artifacts = run_pipeline(config, tmp_path, mode="full", config_path="config.yaml")
+
+    assert artifacts.png_path is not None and artifacts.png_path.exists()
+    assert artifacts.tiff_path is not None and artifacts.tiff_path.exists()
+    assert artifacts.deconvolved_png_path is not None and artifacts.deconvolved_png_path.exists()
+    assert artifacts.deconvolved_tiff_path is not None and artifacts.deconvolved_tiff_path.exists()
+    assert artifacts.deconvolved_planes_path is not None and artifacts.deconvolved_planes_path.exists()
+    assert artifacts.footprint_overlay_path is not None and artifacts.footprint_overlay_path.exists()
+    assert any(item.name.endswith("__deconvolved.fits") for item in (tmp_path / "cache").iterdir())
+    assert artifacts.config_path.name == "project.yaml"
+    assert not (tmp_path / "run_config.yaml").exists()
+

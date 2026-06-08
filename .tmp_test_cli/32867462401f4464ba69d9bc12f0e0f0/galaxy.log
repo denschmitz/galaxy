@@ -1,0 +1,8 @@
+2026-04-03 14:43:15,548 INFO galaxy.pipeline Pipeline start: mode=download-only workdir=C:\Data\dev\galaxy\.tmp_test_cli\32867462401f4464ba69d9bc12f0e0f0
+2026-04-03 14:43:15,559 INFO galaxy.pipeline Candidate manifest write location: C:\Data\dev\galaxy\.tmp_test_cli\32867462401f4464ba69d9bc12f0e0f0\candidates.json
+2026-04-03 14:43:15,559 INFO galaxy.pipeline Automatic selection result count: 1
+2026-04-03 14:43:15,559 INFO galaxy.pipeline Final explicit selection result count: 1
+2026-04-03 14:43:15,559 INFO galaxy.pipeline Available filters: F200W
+2026-04-03 14:43:15,559 INFO galaxy.pipeline Available instruments: NIRCAM
+2026-04-03 14:43:15,660 INFO galaxy.pipeline Downloaded or reused 1 FITS files
+2026-04-03 14:43:15,664 INFO galaxy.pipeline Pipeline finished in download-only mode

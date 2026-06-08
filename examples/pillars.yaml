@@ -40,11 +40,31 @@ planes:
 
 mapping:
   defaults:
-    strategy: wavelength_order
-  channels:
-    red: []
-    green: []
-    blue: []
+    strategy: continuum
+  # Mapping guidance:
+  # 1. Semantic presentation: map filters to scene components such as dust,
+  #    ionized gas, shocks, and stars by giving each filter a custom RGB mix.
+  # 2. Continuum presentation: leave mapping.planes empty and Galaxy will spread
+  #    filters across a blue-to-red visible continuum by wavelength order.
+  planes:
+    - filter: F444W
+      label: dust
+      rgb: {red: 1.00, green: 0.32, blue: 0.06}
+    - filter: F200W
+      label: stars
+      rgb: {red: 0.95, green: 0.95, blue: 1.00}
+    - filter: F090W
+      label: scattered_light
+      rgb: {red: 0.10, green: 0.35, blue: 1.00}
+    - filter: F657N
+      label: ionized_hydrogen
+      rgb: {red: 1.00, green: 0.16, blue: 0.10}
+    - filter: F673N
+      label: shocked_gas
+      rgb: {red: 0.90, green: 0.45, blue: 0.08}
+    - filter: F502N
+      label: oxygen
+      rgb: {red: 0.08, green: 0.85, blue: 1.00}
   derived_planes: []
 
 tone:
@@ -78,3 +98,5 @@ psf:
 
 execution:
   fail_fast: false
+
+

@@ -1,0 +1,19 @@
+2026-04-03 15:33:45,369 INFO galaxy.pipeline Pipeline start: mode=download-only workdir=C:\Data\dev\galaxy\.tmp_test_cli\bbd47f4f42eb4fa4aea52f8aef6b3698
+2026-04-03 15:33:45,369 INFO galaxy.pipeline Candidate manifest write location: C:\Data\dev\galaxy\.tmp_test_cli\bbd47f4f42eb4fa4aea52f8aef6b3698\candidates.json
+2026-04-03 15:33:45,369 INFO galaxy.pipeline Automatic selection result count: 0
+2026-04-03 15:33:45,369 INFO galaxy.pipeline Final explicit selection result count: 0
+2026-04-03 15:33:45,369 ERROR galaxy.pipeline Archive discovery produced no selected candidates
+2026-04-03 15:33:45,369 INFO galaxy.pipeline Loading cached FITS planes from 2 files
+2026-04-03 15:33:45,369 WARNING galaxy.pipeline Skipping bad.fits: corrupt
+2026-04-03 15:33:45,376 INFO galaxy.pipeline Loaded 1 usable FITS planes (filter_skipped=0, load_failed=1)
+2026-04-03 15:33:45,376 INFO galaxy.pipeline Reprojection parameters: canvas=32x32 pixel_scale_arcsec=0.200 projection=TAN rotation_deg=0.000 method=interpolation
+2026-04-03 15:33:45,378 INFO galaxy.pipeline Loading cached FITS planes from 1 files
+2026-04-03 15:33:45,378 WARNING galaxy.pipeline Skipping bad.fits: corrupt
+2026-04-03 15:33:45,378 INFO galaxy.pipeline Loading cached FITS planes from 1 files
+2026-04-03 15:33:45,378 INFO galaxy.pipeline Loaded 1 usable FITS planes (filter_skipped=0, load_failed=0)
+2026-04-03 15:33:45,378 INFO galaxy.pipeline Reprojection parameters: canvas=4000x4000 pixel_scale_arcsec=0.200 projection=TAN rotation_deg=0.000 method=interpolation
+2026-04-03 15:33:45,378 WARNING galaxy.pipeline Warning: estimated reprojection working set is at or above 80% of system RAM (0.5 GiB estimated vs 0.1 GiB installed).
+2026-04-03 15:33:45,384 WARNING galaxy.pipeline Warning: estimated reprojection working set is at or above 80% of system RAM (0.5 GiB estimated vs 0.1 GiB installed).
+2026-04-03 15:33:45,386 INFO galaxy.pipeline Loading cached FITS planes from 1 files
+2026-04-03 15:33:45,386 INFO galaxy.pipeline Loaded 1 usable FITS planes (filter_skipped=0, load_failed=0)
+2026-04-03 15:33:45,389 INFO galaxy.pipeline Reprojection parameters: canvas=32x32 pixel_scale_arcsec=0.200 projection=TAN rotation_deg=12.500 method=interpolation

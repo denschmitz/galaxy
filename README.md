@@ -11,6 +11,7 @@ This repository implements the P0 pipeline end to end and includes extension poi
 
 ## Entry points
 
+
 Galaxy has two different entry modules:
 
 - CLI pipeline: `python -m galaxy.cli ...`
@@ -32,7 +33,7 @@ Galaxy produces presentation products. Nonlinear stretches, channel weighting, d
 - FITS ingestion with WCS-aware reprojection onto a user-defined canvas
 - Multi-plane export, RGB composition, PNG/TIFF export, and provenance reporting
 - Canonical YAML configuration for non-interactive execution and reproduction
-- Streamlit preview UI for tuning mappings and tone settings without re-downloading data, with style export/import
+- Streamlit preview UI for tuning per-plane RGB mixes and tone settings without re-downloading data, with style export/import
 
 ## Installation on Windows 11 with Python 3.12
 
@@ -54,7 +55,7 @@ Notes:
 
 ## Quick start
 
-1. Review [`examples/pillars.yaml`](/C:/Data/dev/galaxy/examples/pillars.yaml).
+1. Review [`examples/pillars.yaml`](/C:/Data/dev/galaxy/examples/pillars.yaml) or [`examples/s305_offset.yaml`](/C:/Data/dev/galaxy/examples/s305_offset.yaml).
 2. Validate the configuration:
 
 ```powershell
@@ -73,7 +74,7 @@ python -m galaxy.cli run --config examples/pillars.yaml --workdir artifacts/pill
 
 ```powershell
 $env:PYTHONPATH = "src"
-python -m galaxy.cli reproduce --config artifacts/pillars/run_config.yaml --workdir artifacts/pillars
+python -m galaxy.cli reproduce --config artifacts/pillars/project.yaml --workdir artifacts/pillars
 ```
 
 5. Launch the preview UI against the aligned plane export:
@@ -116,14 +117,14 @@ python -m galaxy.cli run --config CONFIG.yaml --ra 83.82208 --dec -5.39111 --box
 The Streamlit preview UI supports:
 
 - plane enable/disable toggles
-- per-plane weights into R/G/B
+- per-plane RGB mix controls for semantic or continuum color design
 - channel stretch selection and parameters
 - black/white percentile controls
 - per-channel gain
 - global saturation
 - export/import of style mappings
 
-The UI operates on already aligned planes and does not trigger re-downloads.
+The UI operates on already aligned planes and does not trigger re-downloads. Example YAMLs show both semantic structure mapping and continuum-style wavelength compression.
 
 ## Configuration schema
 
@@ -137,7 +138,7 @@ Galaxy uses a single canonical YAML schema defined in [`src/galaxy/config.py`](/
 - PSF/deconvolution settings using Richardson-Lucy deconvolution with either a common Gaussian PSF or per-plane kernel FITS files
 - execution policy and output paths
 
-See [`examples/pillars.yaml`](/C:/Data/dev/galaxy/examples/pillars.yaml) and [`examples/tutorial.md`](/C:/Data/dev/galaxy/examples/tutorial.md).
+See [`examples/pillars.yaml`](/C:/Data/dev/galaxy/examples/pillars.yaml), [`examples/s305_offset.yaml`](/C:/Data/dev/galaxy/examples/s305_offset.yaml), and [`examples/tutorial.md`](/C:/Data/dev/galaxy/examples/tutorial.md).
 
 ## Output artifacts
 
@@ -149,7 +150,7 @@ Each run can produce:
 - `exported_planes.fits` aligned multi-plane FITS export
 - `composite.png` and `composite.tiff`
 - `provenance.json` full run provenance
-- `run_config.yaml` resolved configuration for reproducibility
+- `project.yaml` Galaxy project file for reproducibility
 
 ## Data source and attribution notes
 
@@ -172,4 +173,6 @@ python -m pytest
 ```
 
 Key design documentation lives in [`docs/design-requirements.md`](/C:/Data/dev/galaxy/docs/design-requirements.md).
+
+
 

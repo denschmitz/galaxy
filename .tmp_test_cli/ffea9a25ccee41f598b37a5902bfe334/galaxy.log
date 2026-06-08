@@ -1,0 +1,12 @@
+2026-04-03 14:42:49,590 INFO galaxy.pipeline Pipeline start: mode=full workdir=C:\Data\dev\galaxy\.tmp_test_cli\ffea9a25ccee41f598b37a5902bfe334
+2026-04-03 14:42:49,590 INFO galaxy.pipeline Candidate manifest write location: C:\Data\dev\galaxy\.tmp_test_cli\ffea9a25ccee41f598b37a5902bfe334\candidates.json
+2026-04-03 14:42:49,590 INFO galaxy.pipeline Automatic selection result count: 1
+2026-04-03 14:42:49,590 INFO galaxy.pipeline Final explicit selection result count: 1
+2026-04-03 14:42:49,590 INFO galaxy.pipeline Available filters: F200W
+2026-04-03 14:42:49,590 INFO galaxy.pipeline Available instruments: NIRCAM
+2026-04-03 14:42:49,590 INFO galaxy.pipeline Downloaded or reused 1 FITS files
+2026-04-03 14:42:49,590 INFO galaxy.pipeline Loading cached FITS planes from 1 files
+2026-04-03 14:42:49,594 INFO galaxy.pipeline Loaded 1 usable FITS planes (filter_skipped=0, load_failed=0)
+2026-04-03 14:42:49,594 INFO galaxy.pipeline Building deconvolved cache companions
+2026-04-03 14:42:49,595 INFO galaxy.pipeline Built 1 deconvolved cache companions
+2026-04-03 14:42:49,595 INFO galaxy.pipeline Reprojection parameters: canvas=32x32 pixel_scale_arcsec=0.200 projection=TAN rotation_deg=0.000 method=interpolation

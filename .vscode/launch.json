@@ -86,13 +86,29 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "env": {
-        "PYTHONPATH": "${workspaceFolder}/src"
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "GALAXY_UI_INPUT_PATH": "${workspaceFolder}/examples/pillars.yaml"
       },
       "args": [
         "run",
-        "${workspaceFolder}/src/galaxy/ui.py",
-        "--",
-        "${workspaceFolder}/examples/pillars.yaml"
+        "${workspaceFolder}/src/galaxy/ui.py"
+      ]
+    },
+    {
+      "name": "Galaxy: Streamlit Discovery UI (S305 Offset)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "streamlit",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "GALAXY_UI_INPUT_PATH": "${workspaceFolder}/examples/s305_offset.yaml"
+      },
+      "args": [
+        "run",
+        "${workspaceFolder}/src/galaxy/ui.py"
       ]
     },
     {
@@ -104,13 +120,29 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "env": {
-        "PYTHONPATH": "${workspaceFolder}/src"
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "GALAXY_UI_INPUT_PATH": "${workspaceFolder}/artifacts/pillars/exported_planes.fits"
       },
       "args": [
         "run",
-        "${workspaceFolder}/src/galaxy/ui.py",
-        "--",
-        "${workspaceFolder}/artifacts/pillars/exported_planes.fits"
+        "${workspaceFolder}/src/galaxy/ui.py"
+      ]
+    },
+    {
+      "name": "Galaxy: Streamlit Preview UI (Pillars, Deconvolved)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "streamlit",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "GALAXY_UI_INPUT_PATH": "${workspaceFolder}/artifacts/pillars/exported_planes_deconvolved.fits"
+      },
+      "args": [
+        "run",
+        "${workspaceFolder}/src/galaxy/ui.py"
       ]
     },
     {
