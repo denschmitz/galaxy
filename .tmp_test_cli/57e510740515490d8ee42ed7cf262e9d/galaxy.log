@@ -1,2 +1,0 @@
-2026-04-03 14:42:47,870 INFO galaxy.pipeline Pipeline start: mode=compose-only workdir=C:\Data\dev\galaxy\.tmp_test_cli\57e510740515490d8ee42ed7cf262e9d
-2026-04-03 14:42:47,870 INFO galaxy.pipeline Compose-only mode reusing exported plane artifacts
