@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import logging
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any, Callable
 from astroquery.mast import Observations
 
 from galaxy.cache import sha256_file
-from galaxy.config import SearchConfig
+from galaxy.processing_config import SearchConfig
 from galaxy.logging_utils import emit_log
 from galaxy.selection import CandidateManifest, CandidateRecord, SelectionInputs
 
@@ -31,6 +32,45 @@ logger = logging.getLogger(__name__)
 class SearchResult:
     observations: list[dict[str, Any]]
     candidates: list[CandidateRecord]
+    complete: bool = True
+    message: str | None = None
+
+
+class ArchiveQueryStatus(str, Enum):
+    COMPLETE = "complete"
+    EMPTY = "empty"
+    INCOMPLETE = "incomplete"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveQueryOutcome:
+    status: ArchiveQueryStatus
+    result: SearchResult | None = None
+    message: str | None = None
+
+
+def query_archive_outcome(
+    shape_kind: str,
+    shape_kwargs: dict[str, Any],
+    search: SearchConfig,
+    progress: Callable[[str], None] | None = None,
+    *,
+    query: Callable[..., SearchResult] | None = None,
+) -> ArchiveQueryOutcome:
+    """Expose zero, failure, and incomplete retrieval as distinct interface states."""
+    runner = query or query_archive
+    try:
+        result = runner(shape_kind, shape_kwargs, search, progress=progress)
+    except Exception as exc:
+        return ArchiveQueryOutcome(ArchiveQueryStatus.FAILED, message=str(exc))
+    if not result.complete:
+        return ArchiveQueryOutcome(
+            ArchiveQueryStatus.INCOMPLETE, result=result,
+            message=result.message or "archive retrieval reported incomplete results",
+        )
+    status = ArchiveQueryStatus.COMPLETE if result.candidates else ArchiveQueryStatus.EMPTY
+    return ArchiveQueryOutcome(status, result=result)
 
 
 def query_archive(
@@ -239,7 +279,10 @@ def download_selected(
                 {
                     "candidate_id": candidate.candidate_id,
                     "product_identifier": candidate.obs_id or filename,
-                    "stable_product_identifier": stable_product_identifier(candidate.extra_metadata.get("raw_product", {})),
+                    "stable_product_identifier": (
+                        candidate.extra_metadata.get("scene_product_id")
+                        or stable_product_identifier(candidate.extra_metadata.get("raw_product", {}))
+                    ),
                     "product_filename": candidate.product_filename,
                     "filter": candidate.filter_name,
                     "product_type": candidate.product_type,
@@ -260,7 +303,10 @@ def download_selected(
                 {
                     "candidate_id": candidate.candidate_id,
                     "product_identifier": candidate.obs_id or filename,
-                    "stable_product_identifier": stable_product_identifier(candidate.extra_metadata.get("raw_product", {})),
+                    "stable_product_identifier": (
+                        candidate.extra_metadata.get("scene_product_id")
+                        or stable_product_identifier(candidate.extra_metadata.get("raw_product", {}))
+                    ),
                     "url": uri,
                     "reason": str(exc),
                 }

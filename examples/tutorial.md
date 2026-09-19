@@ -1,82 +1,70 @@
 # Tutorial Run
 
-This tutorial uses the Pillars of Creation example configuration and is written for Windows 11 PowerShell with Python 3.12.
+This tutorial uses JSON scene cards and Windows 11 PowerShell with Python 3.12.
 
 ## 1. Install dependencies
 
 From the repository root:
 
-```powershell
+~~~powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m pip install -e .
 $env:PYTHONPATH = "src"
-```
+~~~
 
-If PowerShell blocks activation scripts, run this once in the same shell before activating:
+## 2. Validate an example scene card
 
-```powershell
-Set-ExecutionPolicy -Scope Process RemoteSigned
-```
+The translated example is a valid draft. It intentionally does not invent exact MAST
+product pins, so it must be refined before pipeline execution.
 
-## 2. Validate the configuration
+~~~powershell
+python -m galaxy.cli validate-scene --scene examples/pillars.scene.json
+~~~
 
-This checks that the CLI is alive and that the example YAML passes schema validation:
+## 3. Open the five-screen UI
 
-```powershell
-$env:PYTHONPATH = "src"
-python -m galaxy.cli validate-config --config examples/pillars.yaml
-```
+Normal launch opens Discovery. The configured scene library defaults to
+artifacts/scenes.
 
-## 3. Run the full pipeline
+~~~powershell
+python -m streamlit run src/galaxy/ui.py
+~~~
 
-This example uses a 1.5 x 1.5 arcmin square centered on the Pillars of Creation and renders to a 5000 x 5000 output canvas.
+To open the example directly in Scene refinement:
 
-```powershell
-$env:PYTHONPATH = "src"
-python -m galaxy.cli run --config examples/pillars.yaml --workdir artifacts/pillars
-```
+~~~powershell
+python -m streamlit run src/galaxy/ui.py -- examples/pillars.scene.json
+~~~
 
-Expected artifacts:
+Query MAST in Data, inspect and apply exact products, review Color and Frame, then
+save the scene card. A command-line override can select another scene library:
 
-- `artifacts/pillars/cache/`
-- `artifacts/pillars/manifest.json`
-- `artifacts/pillars/reprojected/`
-- `artifacts/pillars/exported_planes.fits`
-- `artifacts/pillars/composite.png`
-- `artifacts/pillars/composite.tiff`
-- `artifacts/pillars/provenance.json`
-- `artifacts/pillars/project.yaml`
+~~~powershell
+python -m streamlit run src/galaxy/ui.py -- --scene-dir alternate-scenes
+~~~
 
-## 4. Tune interactively
+## 4. Run a render-ready saved scene
 
-`src/galaxy/ui.py` is the Streamlit UI entrypoint, not the main CLI entrypoint.
+Use the saved JSON path shown by the UI. A workdir is optional; by default each render
+uses a new associated asset directory beside the scene card.
 
-```powershell
-$env:PYTHONPATH = "src"
-python -m streamlit run src/galaxy/ui.py -- artifacts/pillars/exported_planes.fits
-```
+~~~powershell
+python -m galaxy.cli run --scene artifacts/scenes/your-scene.scene.json
+~~~
 
-Use the sidebar controls to toggle planes, adjust per-plane RGB mixes, change percentiles, save or load a reusable style file, and write an updated Galaxy project YAML.
+Expected successful full-render records and files include candidate and source
+manifests, aligned planes, PNG and TIFF composites, provenance, a thumbnail, and
+immutable references appended to the scene card.
 
-## 5. Reproduce the result
+## 5. Reproduce or open an artifact
 
-```powershell
-$env:PYTHONPATH = "src"
-python -m galaxy.cli reproduce --config artifacts/pillars/project.yaml --workdir artifacts/pillars
-```
+~~~powershell
+python -m galaxy.cli reproduce --scene artifacts/scenes/your-scene.scene.json
+python -m streamlit run src/galaxy/ui.py -- artifacts/scenes/your-scene.scene.json
+~~~
 
-## 6. Optional installed console scripts
-
-After `python -m pip install -e .`, setuptools should also create these shortcuts:
-
-```powershell
-galaxy validate-config --config examples/pillars.yaml
-galaxy run --config examples/pillars.yaml --workdir artifacts/pillars
-galaxy reproduce --config artifacts/pillars/project.yaml --workdir artifacts/pillars
-```
-
-If those scripts are not on `PATH`, keep using the `python -m galaxy.cli ...` form above.
-
+The UI also accepts candidate manifest JSON, multi-plane FITS, or a workdir containing
+one of the supported artifacts. YAML is not a normal UI or CLI input.

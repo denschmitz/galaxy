@@ -5,10 +5,12 @@ import uuid
 import numpy as np
 import pytest
 from astropy.io import fits
+from astropy.wcs import WCS
 from scipy.signal import convolve2d
 
-from galaxy.config import PSFConfig, PSFPlaneConfig
-from galaxy.psf import apply_presentation_psf
+from galaxy.processing_config import PSFConfig, PSFPlaneConfig
+from galaxy.fitsio import FITSPlane
+from galaxy.psf import apply_presentation_psf, build_deconvolved_plane_artifacts
 
 
 def test_psf_enabled_requires_resolvable_kernel() -> None:
@@ -59,3 +61,23 @@ def test_psf_enabled_uses_per_plane_kernel_file() -> None:
         assert processed["plane"][7, 7] > image[7, 7]
     finally:
         shutil.rmtree(test_dir, ignore_errors=True)
+
+
+def test_native_frame_branch_retains_explicitly_unprocessed_planes(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.fits"
+    fits.PrimaryHDU(data=np.ones((3, 3), dtype=np.float32)).writeto(kernel_path)
+    planes = [
+        FITSPlane("processed", np.eye(5, dtype=np.float32), WCS(naxis=2), {}),
+        FITSPlane("original-copy", np.ones((5, 5), dtype=np.float32), WCS(naxis=2), {}),
+    ]
+    result = build_deconvolved_plane_artifacts(
+        planes,
+        PSFConfig(enabled=True, per_plane={
+            "processed": PSFPlaneConfig(enabled=True, kernel_path=str(kernel_path)),
+            "original-copy": PSFPlaneConfig(enabled=False),
+        }),
+        tmp_path,
+    )
+    copied = next(plane for plane in result if plane.plane_id == "original-copy")
+    assert np.array_equal(copied.data, planes[1].data)
+    assert copied.metadata["psf_processed"] is False

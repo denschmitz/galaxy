@@ -12,7 +12,7 @@ import numpy
 import reproject
 import scipy
 
-from galaxy.config import GalaxyConfig
+from galaxy.processing_config import GalaxyConfig
 from galaxy.planes import PlaneRecord
 from galaxy.selection import CandidateManifest
 from galaxy.targeting import ResolvedTarget
@@ -52,7 +52,7 @@ def build_provenance(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target": {
-            "input": config.target.model_dump(mode="json"),
+            "input": config.target.model_dump(mode="json") if config.target is not None else None,
             "resolved_ra_deg": resolved_target.coord.ra.deg,
             "resolved_dec_deg": resolved_target.coord.dec.deg,
             "resolution_source": resolved_target.source,

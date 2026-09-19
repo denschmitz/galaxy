@@ -6,7 +6,7 @@ import re
 
 import numpy as np
 
-from galaxy.config import MappingConfig, PlaneMappingConfig, RGBMixConfig, DerivedPlaneConfig
+from galaxy.processing_config import MappingConfig, PlaneMappingConfig, RGBMixConfig, DerivedPlaneConfig
 
 
 CHANNEL_NAMES = ("red", "green", "blue")

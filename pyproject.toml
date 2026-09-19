@@ -17,7 +17,6 @@ dependencies = [
   "astropy==6.1.7",
   "numpy==2.2.4",
   "pydantic==2.11.2",
-  "PyYAML==6.0.2",
   "reproject==0.15.0",
   "requests==2.32.3",
   "scipy==1.15.2",
@@ -30,6 +29,7 @@ dependencies = [
 dev = [
   "pytest==8.3.5",
   "pytest-cov==6.0.0",
+  "jsonschema==4.26.0",
 ]
 
 [project.scripts]
@@ -45,4 +45,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-

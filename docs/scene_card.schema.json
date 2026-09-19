@@ -1,0 +1,1105 @@
+{
+  "$defs": {
+    "Asset": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "source",
+            "discovery_thumbnail",
+            "render_image",
+            "render_thumbnail",
+            "export_image",
+            "aligned_planes",
+            "footprint",
+            "candidate_manifest",
+            "provenance",
+            "psf_kernel"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "pattern": ".*\\S.*",
+          "title": "Path",
+          "type": "string"
+        },
+        "uri": {
+          "pattern": ".*\\S.*",
+          "title": "Uri",
+          "type": "string"
+        },
+        "media_type": {
+          "pattern": ".*\\S.*",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "byte_count": {
+          "minimum": 0,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-fA-F]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source_url": {
+          "pattern": ".*\\S.*",
+          "title": "Source Url",
+          "type": "string"
+        },
+        "credit": {
+          "title": "Credit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "Asset",
+      "type": "object"
+    },
+    "Canvas": {
+      "additionalProperties": false,
+      "properties": {
+        "center": {
+          "$ref": "#/$defs/Center"
+        },
+        "projection": {
+          "const": "TAN",
+          "title": "Projection",
+          "type": "string"
+        },
+        "pixel_scale_arcsec": {
+          "exclusiveMinimum": 0,
+          "title": "Pixel Scale Arcsec",
+          "type": "number"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "rotation_deg": {
+          "exclusiveMaximum": 360,
+          "minimum": 0,
+          "title": "Rotation Deg",
+          "type": "number"
+        },
+        "flux_conserving": {
+          "title": "Flux Conserving",
+          "type": "boolean"
+        },
+        "view_state": {
+          "$ref": "#/$defs/ViewState"
+        }
+      },
+      "title": "Canvas",
+      "type": "object"
+    },
+    "Center": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "explicit",
+            "resolved_target"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "ra_deg": {
+          "exclusiveMaximum": 360,
+          "minimum": 0,
+          "title": "Ra Deg",
+          "type": "number"
+        },
+        "dec_deg": {
+          "maximum": 90,
+          "minimum": -90,
+          "title": "Dec Deg",
+          "type": "number"
+        }
+      },
+      "title": "Center",
+      "type": "object"
+    },
+    "Contribution": {
+      "additionalProperties": false,
+      "properties": {
+        "plane": {
+          "pattern": ".*\\S.*",
+          "title": "Plane",
+          "type": "string"
+        },
+        "filter": {
+          "pattern": ".*\\S.*",
+          "title": "Filter",
+          "type": "string"
+        },
+        "label": {
+          "pattern": ".*\\S.*",
+          "title": "Label",
+          "type": "string"
+        },
+        "rgb": {
+          "$ref": "#/$defs/RGB"
+        }
+      },
+      "title": "Contribution",
+      "type": "object"
+    },
+    "DerivedPlane": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": ".*\\S.*",
+          "title": "Name",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "linear_combination",
+            "ratio"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "terms": {
+          "items": {
+            "$ref": "#/$defs/Term"
+          },
+          "title": "Terms",
+          "type": "array"
+        },
+        "numerator": {
+          "items": {
+            "$ref": "#/$defs/Term"
+          },
+          "title": "Numerator",
+          "type": "array"
+        },
+        "denominator": {
+          "items": {
+            "$ref": "#/$defs/Term"
+          },
+          "title": "Denominator",
+          "type": "array"
+        },
+        "epsilon": {
+          "exclusiveMinimum": 0,
+          "title": "Epsilon",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "operation"
+      ],
+      "title": "DerivedPlane",
+      "type": "object"
+    },
+    "Discovery": {
+      "additionalProperties": false,
+      "properties": {
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/Source"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "candidate_manifest_asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "Candidate Manifest Asset Id",
+          "type": "string"
+        },
+        "archive_retrieved_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+          "title": "Archive Retrieved At",
+          "type": "string"
+        }
+      },
+      "title": "Discovery",
+      "type": "object"
+    },
+    "Execution": {
+      "additionalProperties": false,
+      "properties": {
+        "fail_fast": {
+          "title": "Fail Fast",
+          "type": "boolean"
+        },
+        "log_file": {
+          "pattern": ".*\\S.*",
+          "title": "Log File",
+          "type": "string"
+        },
+        "debug_to_console": {
+          "title": "Debug To Console",
+          "type": "boolean"
+        },
+        "debug_to_file": {
+          "title": "Debug To File",
+          "type": "boolean"
+        }
+      },
+      "title": "Execution",
+      "type": "object"
+    },
+    "Export": {
+      "additionalProperties": false,
+      "properties": {
+        "export_id": {
+          "pattern": ".*\\S.*",
+          "title": "Export Id",
+          "type": "string"
+        },
+        "render_id": {
+          "pattern": ".*\\S.*",
+          "title": "Render Id",
+          "type": "string"
+        },
+        "created_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+          "title": "Created At",
+          "type": "string"
+        },
+        "format": {
+          "enum": [
+            "png",
+            "tiff"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "destination": {
+          "pattern": ".*\\S.*",
+          "title": "Destination",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "Asset Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "export_id",
+        "render_id",
+        "created_at",
+        "format",
+        "destination"
+      ],
+      "title": "Export",
+      "type": "object"
+    },
+    "Inputs": {
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "search": {
+          "$ref": "#/$defs/Search"
+        },
+        "selection": {
+          "$ref": "#/$defs/Selection"
+        },
+        "canvas": {
+          "$ref": "#/$defs/Canvas"
+        },
+        "planes": {
+          "$ref": "#/$defs/Planes"
+        },
+        "mapping": {
+          "$ref": "#/$defs/Mapping"
+        },
+        "tone": {
+          "$ref": "#/$defs/Tone"
+        },
+        "psf": {
+          "$ref": "#/$defs/PSF"
+        }
+      },
+      "required": [
+        "selection",
+        "canvas",
+        "planes",
+        "mapping",
+        "tone",
+        "psf"
+      ],
+      "title": "Inputs",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "Mapping": {
+      "additionalProperties": false,
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/MappingDefaults"
+        },
+        "planes": {
+          "items": {
+            "$ref": "#/$defs/Contribution"
+          },
+          "title": "Planes",
+          "type": "array"
+        },
+        "derived_planes": {
+          "items": {
+            "$ref": "#/$defs/DerivedPlane"
+          },
+          "title": "Derived Planes",
+          "type": "array"
+        }
+      },
+      "title": "Mapping",
+      "type": "object"
+    },
+    "MappingDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "enum": [
+            "continuum",
+            "wavelength_order"
+          ],
+          "title": "Strategy",
+          "type": "string"
+        }
+      },
+      "title": "MappingDefaults",
+      "type": "object"
+    },
+    "Output": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "enum": [
+            "png",
+            "tiff"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "destination_directory": {
+          "pattern": ".*\\S.*",
+          "title": "Destination Directory",
+          "type": "string"
+        }
+      },
+      "title": "Output",
+      "type": "object"
+    },
+    "PSF": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "common_psf_fwhm_arcsec": {
+          "exclusiveMinimum": 0,
+          "title": "Common Psf Fwhm Arcsec",
+          "type": "number"
+        },
+        "per_plane": {
+          "patternProperties": {
+            ".*\\S.*": {
+              "$ref": "#/$defs/PSFPlane"
+            }
+          },
+          "title": "Per Plane",
+          "type": "object"
+        }
+      },
+      "title": "PSF",
+      "type": "object"
+    },
+    "PSFPlane": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "kernel_asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "Kernel Asset Id",
+          "type": "string"
+        },
+        "max_iterations": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Max Iterations",
+          "type": "integer"
+        },
+        "regularization": {
+          "minimum": 0,
+          "title": "Regularization",
+          "type": "number"
+        }
+      },
+      "title": "PSFPlane",
+      "type": "object"
+    },
+    "Percentiles": {
+      "additionalProperties": false,
+      "properties": {
+        "black": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Black",
+          "type": "number"
+        },
+        "white": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "White",
+          "type": "number"
+        }
+      },
+      "title": "Percentiles",
+      "type": "object"
+    },
+    "Planes": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled_filters": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Enabled Filters",
+          "type": "array"
+        },
+        "disabled_plane_ids": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Disabled Plane Ids",
+          "type": "array"
+        },
+        "export_multiplane_fits": {
+          "title": "Export Multiplane Fits",
+          "type": "boolean"
+        }
+      },
+      "title": "Planes",
+      "type": "object"
+    },
+    "Product": {
+      "additionalProperties": false,
+      "properties": {
+        "product_id": {
+          "pattern": ".*\\S.*",
+          "title": "Product Id",
+          "type": "string"
+        },
+        "archive": {
+          "const": "MAST",
+          "title": "Archive",
+          "type": "string"
+        },
+        "data_uri": {
+          "pattern": ".*\\S.*",
+          "title": "Data Uri",
+          "type": "string"
+        },
+        "observation_id": {
+          "pattern": ".*\\S.*",
+          "title": "Observation Id",
+          "type": "string"
+        },
+        "mission": {
+          "pattern": ".*\\S.*",
+          "title": "Mission",
+          "type": "string"
+        },
+        "instrument": {
+          "pattern": ".*\\S.*",
+          "title": "Instrument",
+          "type": "string"
+        },
+        "detector": {
+          "pattern": ".*\\S.*",
+          "title": "Detector",
+          "type": "string"
+        },
+        "filter": {
+          "pattern": ".*\\S.*",
+          "title": "Filter",
+          "type": "string"
+        },
+        "product_type": {
+          "pattern": ".*\\S.*",
+          "title": "Product Type",
+          "type": "string"
+        },
+        "product_version": {
+          "pattern": ".*\\S.*",
+          "title": "Product Version",
+          "type": "string"
+        },
+        "filename": {
+          "pattern": ".*\\S.*",
+          "title": "Filename",
+          "type": "string"
+        },
+        "exposure_seconds": {
+          "minimum": 0,
+          "title": "Exposure Seconds",
+          "type": "number"
+        },
+        "observed_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "cached_asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "Cached Asset Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "product_id"
+      ],
+      "title": "Product",
+      "type": "object"
+    },
+    "RGB": {
+      "additionalProperties": false,
+      "properties": {
+        "red": {
+          "title": "Red",
+          "type": "number"
+        },
+        "green": {
+          "title": "Green",
+          "type": "number"
+        },
+        "blue": {
+          "title": "Blue",
+          "type": "number"
+        }
+      },
+      "title": "RGB",
+      "type": "object"
+    },
+    "Region": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "circle",
+            "box"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "radius_arcmin": {
+          "exclusiveMinimum": 0,
+          "title": "Radius Arcmin",
+          "type": "number"
+        },
+        "width_arcmin": {
+          "exclusiveMinimum": 0,
+          "title": "Width Arcmin",
+          "type": "number"
+        },
+        "height_arcmin": {
+          "exclusiveMinimum": 0,
+          "title": "Height Arcmin",
+          "type": "number"
+        }
+      },
+      "title": "Region",
+      "type": "object"
+    },
+    "Render": {
+      "additionalProperties": false,
+      "properties": {
+        "render_id": {
+          "pattern": ".*\\S.*",
+          "title": "Render Id",
+          "type": "string"
+        },
+        "created_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+          "title": "Created At",
+          "type": "string"
+        },
+        "content_revision": {
+          "exclusiveMinimum": 0,
+          "title": "Content Revision",
+          "type": "integer"
+        },
+        "branch": {
+          "enum": [
+            "original",
+            "deconvolved"
+          ],
+          "title": "Branch",
+          "type": "string"
+        },
+        "image_asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "Image Asset Id",
+          "type": "string"
+        },
+        "inputs": {
+          "$ref": "#/$defs/Inputs"
+        },
+        "provenance_asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "Provenance Asset Id",
+          "type": "string"
+        },
+        "thumbnail_asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "Thumbnail Asset Id",
+          "type": "string"
+        },
+        "aligned_plane_asset_ids": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Aligned Plane Asset Ids",
+          "type": "array"
+        },
+        "footprint_asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "Footprint Asset Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "render_id",
+        "created_at",
+        "content_revision",
+        "branch",
+        "image_asset_id",
+        "inputs",
+        "provenance_asset_id"
+      ],
+      "title": "Render",
+      "type": "object"
+    },
+    "Search": {
+      "additionalProperties": false,
+      "properties": {
+        "missions": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Missions",
+          "type": "array"
+        },
+        "instruments": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Instruments",
+          "type": "array"
+        },
+        "detectors": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Detectors",
+          "type": "array"
+        },
+        "filters": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Filters",
+          "type": "array"
+        },
+        "product_types": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Product Types",
+          "type": "array"
+        },
+        "observation_date_start": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+          "title": "Observation Date Start",
+          "type": "string"
+        },
+        "observation_date_end": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+          "title": "Observation Date End",
+          "type": "string"
+        },
+        "observation_selection": {
+          "enum": [
+            "all",
+            "latest_per_filter",
+            "deepest_per_filter"
+          ],
+          "title": "Observation Selection",
+          "type": "string"
+        },
+        "max_observations_per_filter": {
+          "exclusiveMinimum": 0,
+          "title": "Max Observations Per Filter",
+          "type": "integer"
+        },
+        "max_total_observations": {
+          "exclusiveMinimum": 0,
+          "title": "Max Total Observations",
+          "type": "integer"
+        }
+      },
+      "title": "Search",
+      "type": "object"
+    },
+    "Selection": {
+      "additionalProperties": false,
+      "properties": {
+        "products": {
+          "items": {
+            "$ref": "#/$defs/Product"
+          },
+          "title": "Products",
+          "type": "array"
+        },
+        "selected_product_ids": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Selected Product Ids",
+          "type": "array"
+        },
+        "observation_ids": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Observation Ids",
+          "type": "array"
+        }
+      },
+      "title": "Selection",
+      "type": "object"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "properties": {
+        "source_kind": {
+          "enum": [
+            "release_tracker",
+            "name_resolver"
+          ],
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "source_url": {
+          "pattern": ".*\\S.*",
+          "title": "Source Url",
+          "type": "string"
+        },
+        "retrieved_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+          "title": "Retrieved At",
+          "type": "string"
+        },
+        "extracted_metadata": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Extracted Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "source_kind",
+        "source_url",
+        "retrieved_at",
+        "extracted_metadata"
+      ],
+      "title": "Source",
+      "type": "object"
+    },
+    "Stretch": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "asinh",
+            "gamma"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "parameter": {
+          "exclusiveMinimum": 0,
+          "title": "Parameter",
+          "type": "number"
+        }
+      },
+      "title": "Stretch",
+      "type": "object"
+    },
+    "Stretches": {
+      "additionalProperties": false,
+      "properties": {
+        "red": {
+          "$ref": "#/$defs/Stretch"
+        },
+        "green": {
+          "$ref": "#/$defs/Stretch"
+        },
+        "blue": {
+          "$ref": "#/$defs/Stretch"
+        }
+      },
+      "title": "Stretches",
+      "type": "object"
+    },
+    "Target": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": ".*\\S.*",
+          "title": "Name",
+          "type": "string"
+        },
+        "resolved_name": {
+          "pattern": ".*\\S.*",
+          "title": "Resolved Name",
+          "type": "string"
+        },
+        "ra_deg": {
+          "exclusiveMaximum": 360,
+          "minimum": 0,
+          "title": "Ra Deg",
+          "type": "number"
+        },
+        "dec_deg": {
+          "maximum": 90,
+          "minimum": -90,
+          "title": "Dec Deg",
+          "type": "number"
+        },
+        "ra": {
+          "pattern": ".*\\S.*",
+          "title": "Ra",
+          "type": "string"
+        },
+        "dec": {
+          "pattern": ".*\\S.*",
+          "title": "Dec",
+          "type": "string"
+        },
+        "coordinate_frame": {
+          "const": "ICRS",
+          "title": "Coordinate Frame",
+          "type": "string"
+        },
+        "region": {
+          "$ref": "#/$defs/Region"
+        }
+      },
+      "title": "Target",
+      "type": "object"
+    },
+    "Term": {
+      "additionalProperties": false,
+      "properties": {
+        "plane": {
+          "pattern": ".*\\S.*",
+          "title": "Plane",
+          "type": "string"
+        },
+        "weight": {
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "plane",
+        "weight"
+      ],
+      "title": "Term",
+      "type": "object"
+    },
+    "Tone": {
+      "additionalProperties": false,
+      "properties": {
+        "stretch": {
+          "$ref": "#/$defs/Stretches"
+        },
+        "percentiles": {
+          "$ref": "#/$defs/Percentiles"
+        },
+        "gain": {
+          "$ref": "#/$defs/RGB"
+        },
+        "bias": {
+          "$ref": "#/$defs/RGB"
+        },
+        "saturation": {
+          "minimum": 0,
+          "title": "Saturation",
+          "type": "number"
+        }
+      },
+      "title": "Tone",
+      "type": "object"
+    },
+    "ViewState": {
+      "additionalProperties": false,
+      "properties": {
+        "zoom": {
+          "exclusiveMinimum": 0,
+          "title": "Zoom",
+          "type": "number"
+        },
+        "pan_x": {
+          "title": "Pan X",
+          "type": "number"
+        },
+        "pan_y": {
+          "title": "Pan Y",
+          "type": "number"
+        }
+      },
+      "title": "ViewState",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "document_type": {
+      "const": "galaxy.scene_card",
+      "title": "Document Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "scene_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "title": "Scene Id",
+      "type": "string"
+    },
+    "title": {
+      "pattern": ".*\\S.*",
+      "title": "Title",
+      "type": "string"
+    },
+    "created_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "content_revision": {
+      "exclusiveMinimum": 0,
+      "title": "Content Revision",
+      "type": "integer"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "target": {
+      "$ref": "#/$defs/Target"
+    },
+    "search": {
+      "$ref": "#/$defs/Search"
+    },
+    "discovery": {
+      "$ref": "#/$defs/Discovery"
+    },
+    "selection": {
+      "$ref": "#/$defs/Selection"
+    },
+    "canvas": {
+      "$ref": "#/$defs/Canvas"
+    },
+    "planes": {
+      "$ref": "#/$defs/Planes"
+    },
+    "mapping": {
+      "$ref": "#/$defs/Mapping"
+    },
+    "tone": {
+      "$ref": "#/$defs/Tone"
+    },
+    "psf": {
+      "$ref": "#/$defs/PSF"
+    },
+    "execution": {
+      "$ref": "#/$defs/Execution"
+    },
+    "assets": {
+      "patternProperties": {
+        ".*\\S.*": {
+          "$ref": "#/$defs/Asset"
+        }
+      },
+      "title": "Assets",
+      "type": "object"
+    },
+    "thumbnail_asset_id": {
+      "pattern": ".*\\S.*",
+      "title": "Thumbnail Asset Id",
+      "type": "string"
+    },
+    "renders": {
+      "items": {
+        "$ref": "#/$defs/Render"
+      },
+      "title": "Renders",
+      "type": "array"
+    },
+    "exports": {
+      "items": {
+        "$ref": "#/$defs/Export"
+      },
+      "title": "Exports",
+      "type": "array"
+    },
+    "output": {
+      "$ref": "#/$defs/Output"
+    }
+  },
+  "required": [
+    "document_type",
+    "schema_version",
+    "scene_id",
+    "title",
+    "created_at",
+    "updated_at",
+    "content_revision"
+  ],
+  "title": "SceneCard",
+  "type": "object"
+}

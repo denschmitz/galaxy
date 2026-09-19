@@ -1,0 +1,138 @@
+{
+  "document_type": "galaxy.scene_card",
+  "schema_version": 1,
+  "scene_id": "53282ded-8cb4-4a85-8fc0-cb7de9932e2b",
+  "title": "s305_offset",
+  "created_at": "2026-09-11T12:00:00Z",
+  "updated_at": "2026-09-11T12:00:00Z",
+  "content_revision": 1,
+  "target": {
+    "name": "S305 offset",
+    "ra_deg": 112.532817,
+    "dec_deg": -18.558079,
+    "coordinate_frame": "ICRS",
+    "region": {
+      "kind": "box",
+      "width_arcmin": 3,
+      "height_arcmin": 3
+    }
+  },
+  "search": {
+    "missions": [
+      "JWST"
+    ],
+    "instruments": [
+      "NIRCAM"
+    ],
+    "detectors": [],
+    "filters": [
+      "F140M",
+      "F300M",
+      "F444W"
+    ],
+    "product_types": [
+      "SCIENCE",
+      "I2D"
+    ],
+    "observation_selection": "latest_per_filter",
+    "max_observations_per_filter": 1
+  },
+  "canvas": {
+    "center": {
+      "mode": "explicit",
+      "ra_deg": 112.532817,
+      "dec_deg": -18.558079
+    },
+    "projection": "TAN",
+    "pixel_scale_arcsec": 0.04,
+    "width": 4500,
+    "height": 4500,
+    "rotation_deg": 0,
+    "flux_conserving": true
+  },
+  "planes": {
+    "enabled_filters": [
+      "F140M",
+      "F300M",
+      "F444W"
+    ],
+    "disabled_plane_ids": [],
+    "export_multiplane_fits": true
+  },
+  "mapping": {
+    "defaults": {
+      "strategy": "continuum"
+    },
+    "planes": [
+      {
+        "filter": "F444W",
+        "label": "long_wave_dust",
+        "rgb": {
+          "red": 1,
+          "green": 0.18,
+          "blue": 0
+        }
+      },
+      {
+        "filter": "F300M",
+        "label": "mid_wave_structure",
+        "rgb": {
+          "red": 0.25,
+          "green": 0.95,
+          "blue": 0.15
+        }
+      },
+      {
+        "filter": "F140M",
+        "label": "short_wave_stars",
+        "rgb": {
+          "red": 0,
+          "green": 0.28,
+          "blue": 1
+        }
+      }
+    ],
+    "derived_planes": []
+  },
+  "tone": {
+    "stretch": {
+      "red": {
+        "kind": "asinh",
+        "parameter": 5
+      },
+      "green": {
+        "kind": "asinh",
+        "parameter": 4.5
+      },
+      "blue": {
+        "kind": "asinh",
+        "parameter": 4
+      }
+    },
+    "percentiles": {
+      "black": 0.5,
+      "white": 99.7
+    },
+    "gain": {
+      "red": 1,
+      "green": 1,
+      "blue": 1.05
+    },
+    "bias": {
+      "red": 0,
+      "green": 0,
+      "blue": 0
+    },
+    "saturation": 1.15
+  },
+  "psf": {
+    "enabled": false,
+    "per_plane": {}
+  },
+  "execution": {
+    "fail_fast": false,
+    "log_file": "galaxy.log",
+    "debug_to_console": false,
+    "debug_to_file": true
+  }
+}

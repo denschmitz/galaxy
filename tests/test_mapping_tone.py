@@ -1,6 +1,6 @@
 import numpy as np
 
-from galaxy.config import MappingConfig, ToneConfig
+from galaxy.processing_config import MappingConfig, ToneConfig
 from galaxy.mapping import CompositionInputs, compose_channels
 from galaxy.tone import apply_tone
 

@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from galaxy.config import GalaxyConfig
+from galaxy.processing_config import GalaxyConfig
 from galaxy.pipeline import run_pipeline
 
 

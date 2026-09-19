@@ -6,7 +6,7 @@ from astropy.io import fits
 import numpy as np
 from scipy.signal import convolve2d
 
-from galaxy.config import PSFConfig
+from galaxy.processing_config import PSFConfig
 from galaxy.fitsio import FITSPlane
 
 
@@ -41,27 +41,29 @@ def build_deconvolved_plane_artifacts(planes: list[FITSPlane], psf: PSFConfig, c
         return []
 
     resolved = {plane.plane_id: _resolve_kernel_spec(plane.plane_id, psf) for plane in planes}
-    missing = [plane.plane_id for plane in planes if resolved[plane.plane_id] is None]
-    if missing:
+    if not any(spec is not None for spec in resolved.values()):
         raise ValueError(
-            "psf.enabled requires a valid kernel for every plane in the deconvolved branch; "
-            f"missing kernels for: {', '.join(sorted(missing))}"
+            "psf.enabled requires a valid kernel for at least one enabled plane in the deconvolved branch"
         )
 
     processed_planes: list[FITSPlane] = []
     for plane in planes:
         spec = resolved[plane.plane_id]
-        assert spec is not None
-        processed = _richardson_lucy(
-            np.asarray(plane.data, dtype=np.float32),
-            spec["kernel"],
-            iterations=spec["iterations"],
-            regularization=spec["regularization"],
+        processed = (
+            np.asarray(plane.data, dtype=np.float32).copy()
+            if spec is None
+            else _richardson_lucy(
+                np.asarray(plane.data, dtype=np.float32),
+                spec["kernel"],
+                iterations=spec["iterations"],
+                regularization=spec["regularization"],
+            )
         )
         source_path = Path(str(plane.metadata.get("source_path") or cache_dir / f"{plane.plane_id}.fits"))
         destination = cache_dir / f"{source_path.stem}{DECONVOLVED_SUFFIX}.fits"
         metadata = dict(plane.metadata)
         metadata["artifact_branch"] = "deconvolved"
+        metadata["psf_processed"] = spec is not None
         metadata["original_source_path"] = str(source_path)
         metadata["source_path"] = str(destination)
         _write_plane_artifact(destination, processed, plane)

@@ -8,7 +8,7 @@ import astropy.units as u
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from galaxy.config import ExecutionConfig, GalaxyConfig, PSFConfig
+from galaxy.processing_config import ExecutionConfig, GalaxyConfig, PSFConfig
 from galaxy.fitsio import FITSPlane
 from galaxy.pipeline import _load_or_build_reprojected, run_pipeline
 from galaxy.reprojection import REPROJECT_METHOD_INTERPOLATION, ReprojectedPlane, estimate_workspace_peak_bytes
@@ -125,13 +125,13 @@ def test_run_pipeline_download_only_writes_manifest_candidates_and_provenance(mo
 
     monkeypatch.setattr("galaxy.pipeline.download_selected", fake_download_selected)
 
-    artifacts = run_pipeline(config, tmp_path, mode="download-only", config_path="config.yaml")
+    artifacts = run_pipeline(config, tmp_path, mode="download-only", config_path="scene.json")
 
     manifest = json.loads(artifacts.manifest_path.read_text(encoding="utf-8"))
     provenance = json.loads(artifacts.provenance_path.read_text(encoding="utf-8"))
     candidates = load_candidate_manifest(tmp_path / "candidates.json")
 
-    assert artifacts.config_path.exists()
+    assert artifacts.config_path == Path("scene.json")
     assert artifacts.footprint_overlay_path is None
     assert not (tmp_path / "run_config.yaml").exists()
     assert manifest[0]["candidate_id"] == "cand-1"
@@ -145,14 +145,14 @@ def test_run_pipeline_compose_only_uses_exported_planes(tmp_path) -> None:
     config = _base_config()
     _write_exported_planes(tmp_path / "exported_planes.fits")
 
-    artifacts = run_pipeline(config, tmp_path, mode="compose-only", config_path="config.yaml")
+    artifacts = run_pipeline(config, tmp_path, mode="compose-only", config_path="scene.json")
     provenance = json.loads(artifacts.provenance_path.read_text(encoding="utf-8"))
 
     assert artifacts.png_path is not None and artifacts.png_path.exists()
     assert artifacts.tiff_path is not None and artifacts.tiff_path.exists()
     assert artifacts.footprint_overlay_path is not None and artifacts.footprint_overlay_path.exists()
     assert provenance["reprojection"]["mode"] == "compose_only_export"
-    assert artifacts.config_path.name == "project.yaml"
+    assert artifacts.config_path.name == "scene.json"
     assert not (tmp_path / "run_config.yaml").exists()
 
 
@@ -161,7 +161,7 @@ def test_run_pipeline_raises_when_no_selected_candidates(monkeypatch, tmp_path) 
     monkeypatch.setattr("galaxy.pipeline.discover_candidates", lambda *args, **kwargs: [])
 
     with pytest.raises(RuntimeError, match="no selected candidates"):
-        run_pipeline(config, tmp_path, mode="download-only", config_path="config.yaml")
+        run_pipeline(config, tmp_path, mode="download-only", config_path="scene.json")
 
 
 def test_load_or_build_reprojected_continues_past_bad_files_when_fail_fast_disabled(monkeypatch, tmp_path) -> None:
@@ -402,7 +402,7 @@ def test_run_pipeline_with_psf_exports_original_and_deconvolved_branches(monkeyp
 
     monkeypatch.setattr("galaxy.pipeline.load_fits_plane", fake_load_fits_plane)
 
-    artifacts = run_pipeline(config, tmp_path, mode="full", config_path="config.yaml")
+    artifacts = run_pipeline(config, tmp_path, mode="full", config_path="scene.json")
 
     assert artifacts.png_path is not None and artifacts.png_path.exists()
     assert artifacts.tiff_path is not None and artifacts.tiff_path.exists()
@@ -411,6 +411,6 @@ def test_run_pipeline_with_psf_exports_original_and_deconvolved_branches(monkeyp
     assert artifacts.deconvolved_planes_path is not None and artifacts.deconvolved_planes_path.exists()
     assert artifacts.footprint_overlay_path is not None and artifacts.footprint_overlay_path.exists()
     assert any(item.name.endswith("__deconvolved.fits") for item in (tmp_path / "cache").iterdir())
-    assert artifacts.config_path.name == "project.yaml"
+    assert artifacts.config_path.name == "scene.json"
     assert not (tmp_path / "run_config.yaml").exists()
 

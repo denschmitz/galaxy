@@ -5,10 +5,12 @@ import logging
 from pathlib import Path
 from typing import Callable
 
+from astropy.coordinates import SkyCoord
+import astropy.units as u
 from astropy.wcs import WCS
 
 from galaxy.cache import ensure_directory, write_manifest
-from galaxy.config import GalaxyConfig, dump_config
+from galaxy.processing_config import GalaxyConfig
 from galaxy.export import export_footprint_overlay, export_png, export_tiff
 from galaxy.fitsio import FITSPlane, load_fits_plane
 from galaxy.logging_utils import configure_logging, emit_log
@@ -29,11 +31,22 @@ from galaxy.reprojection import (
     save_reprojected_plane,
 )
 from galaxy.selection import CandidateManifest, SelectionInputs, write_candidate_manifest
-from galaxy.targeting import region_to_mast_shape, resolve_target
+from galaxy.scene_models import SceneCard
+from galaxy.scene_readiness import readiness
+from galaxy.targeting import ResolvedTarget, region_to_mast_shape, resolve_target
 from galaxy.tone import apply_tone
 
 
 logger = logging.getLogger(__name__)
+
+
+class PipelineCancelled(RuntimeError):
+    """Raised only at a processing boundary after cancellation is requested."""
+
+
+def _cancellation_checkpoint(cancel_requested: Callable[[], bool] | None, stage: str) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise PipelineCancelled(f"render cancelled before {stage}")
 
 
 @dataclass(slots=True)
@@ -49,6 +62,7 @@ class PipelineArtifacts:
     deconvolved_tiff_path: Path | None
     provenance_path: Path
     config_path: Path
+    inspected_plane_filters: dict[str, str]
 
 
 @dataclass(slots=True)
@@ -68,6 +82,10 @@ def run_pipeline(
     config_path: str | None = None,
     selection_manifest: CandidateManifest | None = None,
     selection_inputs: SelectionInputs | None = None,
+    pinned_selection: bool = False,
+    local_product_paths: dict[str, Path] | None = None,
+    scene_card: SceneCard | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> PipelineArtifacts:
     output_dir = ensure_directory(workdir)
     configure_logging(
@@ -79,20 +97,32 @@ def run_pipeline(
     reprojected_dir = ensure_directory(output_dir / "reprojected")
 
     emit_log(logger, logging.INFO, f"Pipeline start: mode={mode} workdir={output_dir}", progress)
+    _cancellation_checkpoint(cancel_requested, "target resolution")
 
     resolved_target = resolve_target(config.target) if config.target is not None else None
     shape_kind = None
     shape_kwargs = None
     if resolved_target is not None:
         shape_kind, shape_kwargs = region_to_mast_shape(config.target.region, resolved_target.coord)
+        resolved_center = resolved_target.coord
+    elif config.canvas.center.mode == "explicit":
+        resolved_center = SkyCoord(config.canvas.center.ra_deg * u.deg, config.canvas.center.dec_deg * u.deg)
+        resolved_target = ResolvedTarget(coord=resolved_center.icrs, source="explicit-canvas", region={})
+    else:
+        resolved_center = None
 
     candidate_manifest: CandidateManifest | None = None
-    execution_source = "saved_candidate_manifest" if selection_manifest is not None else "raw_config_discovery"
+    execution_source = (
+        "pinned_scene_card" if pinned_selection
+        else "saved_candidate_manifest" if selection_manifest is not None
+        else "raw_config_discovery"
+    )
     manifest: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
     cached_paths: list[Path] = sorted(cache_dir.glob("*.fits*"))
 
     if mode in {"full", "download-only", "reproject-only"}:
+        _cancellation_checkpoint(cancel_requested, "discovery and download")
         if mode in {"full", "download-only"} or not cached_paths:
             if selection_manifest is None:
                 if shape_kind is None or shape_kwargs is None:
@@ -105,6 +135,9 @@ def run_pipeline(
                     config_path=config_path,
                     selection_inputs=selection_inputs,
                 )
+            elif pinned_selection:
+                emit_log(logger, logging.INFO, "Using exact product pins from scene card", progress)
+                candidate_manifest = selection_manifest
             else:
                 emit_log(logger, logging.INFO, "Loaded candidate manifest for execution", progress)
                 merged_inputs = _merge_selection_inputs(selection_manifest.selection_inputs, selection_inputs)
@@ -131,7 +164,18 @@ def run_pipeline(
                 raise RuntimeError(
                     "archive discovery produced no selected candidates; adjust the selection policy, explicit overrides, or base search filters"
                 )
-            manifest, skipped = download_selected(candidate_manifest.candidates, cache_dir, progress=progress)
+            manifest = _local_product_manifest(candidate_manifest, local_product_paths or {})
+            local_ids = {str(entry["candidate_id"]) for entry in manifest}
+            remote_candidates = [
+                candidate for candidate in candidate_manifest.candidates
+                if candidate.selected and candidate.candidate_id not in local_ids
+            ]
+            downloaded, skipped = (
+                download_selected(remote_candidates, cache_dir, progress=progress)
+                if remote_candidates else ([], [])
+            )
+            manifest.extend(downloaded)
+            _cancellation_checkpoint(cancel_requested, "manifest publication")
             write_manifest(manifest, output_dir / "manifest.json")
             cached_paths = [Path(entry["local_path"]) for entry in manifest]
             emit_log(logger, logging.INFO, f"Downloaded or reused {len(cached_paths)} FITS files", progress)
@@ -149,6 +193,7 @@ def run_pipeline(
                 )
 
     if mode == "download-only":
+        _cancellation_checkpoint(cancel_requested, "download provenance")
         provenance = build_provenance(
             config,
             resolved_target,
@@ -160,26 +205,28 @@ def run_pipeline(
             execution_source,
         )
         write_provenance(provenance, output_dir / "provenance.json")
-        _write_project_files(config, output_dir)
         emit_log(logger, logging.INFO, "Pipeline finished in download-only mode", progress)
-        return _finalize_artifacts(output_dir)
+        return _finalize_artifacts(output_dir, Path(config_path) if config_path else None)
 
-    if resolved_target is None:
+    if resolved_center is None:
         logger.error("Pipeline cannot continue without target coordinates for reprojection")
         raise RuntimeError("reprojection and composition require a target-defined scene")
 
+    _cancellation_checkpoint(cancel_requested, "reprojection")
     reprojected_result = _load_or_build_reprojected(
         config,
-        resolved_target.coord,
+        resolved_center,
         cached_paths,
         cache_dir,
         output_dir,
         reprojected_dir,
         mode,
         progress,
+        scene_card=scene_card,
     )
     original_reprojected = reprojected_result.original_planes
     deconvolved_reprojected = reprojected_result.deconvolved_planes
+    _cancellation_checkpoint(cancel_requested, "aligned-plane export")
     if not original_reprojected:
         diagnostics = reprojected_result.diagnostics
         logger.error(
@@ -216,6 +263,7 @@ def run_pipeline(
         )
 
     footprint_overlay_path = _export_footprint_overlay(original_reprojected, output_dir / "footprints.png")
+    _cancellation_checkpoint(cancel_requested, "composition")
 
     if mode == "reproject-only":
         provenance = build_provenance(
@@ -229,9 +277,8 @@ def run_pipeline(
             execution_source,
         )
         write_provenance(provenance, output_dir / "provenance.json")
-        _write_project_files(config, output_dir)
         emit_log(logger, logging.INFO, "Pipeline finished in reproject-only mode", progress)
-        return _finalize_artifacts(output_dir)
+        return _finalize_artifacts(output_dir, Path(config_path) if config_path else None)
 
     png_path, tiff_path = _compose_and_export_branch(
         original_reprojected,
@@ -251,6 +298,8 @@ def run_pipeline(
             output_dir / "composite_deconvolved.tiff",
         )
 
+    _cancellation_checkpoint(cancel_requested, "provenance and history commit")
+
     provenance = build_provenance(
         config,
         resolved_target,
@@ -262,7 +311,6 @@ def run_pipeline(
         execution_source,
     )
     write_provenance(provenance, output_dir / "provenance.json")
-    _write_project_files(config, output_dir)
     emit_log(logger, logging.INFO, "Pipeline finished successfully", progress)
     return PipelineArtifacts(
         workdir=output_dir,
@@ -275,7 +323,11 @@ def run_pipeline(
         tiff_path=tiff_path,
         deconvolved_tiff_path=deconvolved_tiff_path,
         provenance_path=output_dir / "provenance.json",
-        config_path=output_dir / "project.yaml",
+        config_path=Path(config_path) if config_path else output_dir / "scene-card-input.json",
+        inspected_plane_filters={
+            plane.plane_id: str(plane.metadata.get("filter") or "")
+            for plane in original_reprojected
+        },
     )
 
 
@@ -288,6 +340,8 @@ def _load_or_build_reprojected(
     reprojected_dir: Path,
     mode: str,
     progress: Callable[[str], None] | None,
+    *,
+    scene_card: SceneCard | None = None,
 ) -> ReprojectionLoadResult:
     exported_planes = output_dir / "exported_planes.fits"
     exported_deconvolved_planes = output_dir / "exported_planes_deconvolved.fits"
@@ -295,6 +349,7 @@ def _load_or_build_reprojected(
         emit_log(logger, logging.INFO, "Compose-only mode reusing exported plane artifacts", progress)
         original_planes = load_multiplane_records(exported_planes)
         deconvolved_planes = load_multiplane_records(exported_deconvolved_planes) if exported_deconvolved_planes.exists() else []
+        _validate_inspected_scene(scene_card, original_planes, require_deconvolved=bool(deconvolved_planes))
         return ReprojectionLoadResult(
             original_planes=original_planes,
             deconvolved_planes=deconvolved_planes,
@@ -357,6 +412,8 @@ def _load_or_build_reprojected(
 
     if not fits_planes:
         return ReprojectionLoadResult(original_planes=[], deconvolved_planes=[], diagnostics=diagnostics)
+
+    _validate_inspected_scene(scene_card, fits_planes, require_deconvolved=config.psf.enabled)
 
     deconvolved_fits_planes: list[FITSPlane] = []
     if config.psf.enabled:
@@ -499,8 +556,52 @@ def _merge_selection_inputs(base: SelectionInputs, override: SelectionInputs | N
     )
 
 
-def _write_project_files(config: GalaxyConfig, output_dir: Path) -> None:
-    dump_config(config, output_dir / "project.yaml")
+def _local_product_manifest(
+    candidates: CandidateManifest, local_paths: dict[str, Path],
+) -> list[dict[str, object]]:
+    from galaxy.cache import sha256_file
+    records: list[dict[str, object]] = []
+    by_id = {item.candidate_id: item for item in candidates.candidates if item.selected}
+    unknown = set(local_paths) - set(by_id)
+    if unknown:
+        raise ValueError(f"local product paths include unknown pins: {', '.join(sorted(unknown))}")
+    for candidate_id, source in local_paths.items():
+        candidate = by_id[candidate_id]
+        records.append({
+            "candidate_id": candidate_id,
+            "product_identifier": candidate.obs_id or candidate_id,
+            "stable_product_identifier": candidate_id,
+            "product_filename": candidate.product_filename or source.name,
+            "filter": candidate.filter_name,
+            "product_type": candidate.product_type,
+            "product_version": candidate.product_version,
+            "selection_rank": candidate.selection_rank,
+            "selected_reason": "selected:pinned_scene_card_local_asset",
+            "url": candidate.data_uri,
+            "local_path": str(source),
+            "file_size": source.stat().st_size,
+            "checksum": sha256_file(source),
+            "download_timestamp": None,
+            "status": "complete",
+        })
+    return records
+
+
+def _validate_inspected_scene(
+    card: SceneCard | None, planes: list[FITSPlane] | list[ReprojectedPlane], *,
+    require_deconvolved: bool,
+) -> None:
+    if card is None:
+        return
+    plane_filters = {plane.plane_id: str(plane.metadata.get("filter") or "") for plane in planes}
+    branches = ("original", "deconvolved") if require_deconvolved else ("original",)
+    problems = [
+        item for branch in branches
+        for item in readiness(card, "render", plane_filters=plane_filters, branch=branch)
+    ]
+    if problems:
+        message = "\n".join(f"{item.path}: [{item.code}] {item.message}" for item in problems)
+        raise ValueError(f"scene card is not render-ready for inspected FITS planes:\n{message}")
 
 
 def _reprojection_settings(diagnostics: dict[str, object]) -> dict[str, object]:
@@ -526,7 +627,10 @@ def _reprojection_settings(diagnostics: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _finalize_artifacts(output_dir: Path) -> PipelineArtifacts:
+def _finalize_artifacts(
+    output_dir: Path, config_path: Path | None = None,
+    inspected_plane_filters: dict[str, str] | None = None,
+) -> PipelineArtifacts:
     return PipelineArtifacts(
         workdir=output_dir,
         manifest_path=output_dir / "manifest.json",
@@ -538,5 +642,6 @@ def _finalize_artifacts(output_dir: Path) -> PipelineArtifacts:
         tiff_path=output_dir / "composite.tiff" if (output_dir / "composite.tiff").exists() else None,
         deconvolved_tiff_path=output_dir / "composite_deconvolved.tiff" if (output_dir / "composite_deconvolved.tiff").exists() else None,
         provenance_path=output_dir / "provenance.json",
-        config_path=output_dir / "project.yaml",
+        config_path=config_path or output_dir / "scene-card-input.json",
+        inspected_plane_filters=inspected_plane_filters or {},
     )

@@ -2,83 +2,46 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Galaxy: Validate Pillars Config",
+      "name": "Galaxy: UI Human Test (Normal Launch)",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "module": "galaxy.cli",
+      "module": "streamlit",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/src"
-      },
-      "args": [
-        "validate-config",
-        "--config",
-        "${workspaceFolder}/examples/pillars.yaml"
-      ]
-    },
-    {
-      "name": "Galaxy: Discover Pillars Candidates",
-      "type": "debugpy",
-      "request": "launch",
-      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "module": "galaxy.cli",
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/src"
-      },
-      "args": [
-        "discover",
-        "--config",
-        "${workspaceFolder}/examples/pillars.yaml",
-        "--out",
-        "${workspaceFolder}/artifacts/pillars/candidates.json"
-      ]
-    },
-    {
-      "name": "Galaxy: Run Pillars From Selection",
-      "type": "debugpy",
-      "request": "launch",
-      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "module": "galaxy.cli",
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/src"
-      },
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
       "args": [
         "run",
-        "--config",
-        "${workspaceFolder}/examples/pillars.yaml",
-        "--workdir",
-        "${workspaceFolder}/artifacts/pillars",
-        "--selection",
-        "${workspaceFolder}/artifacts/pillars/candidates.json"
+        "${workspaceFolder}/src/galaxy/ui.py",
+        "--server.fileWatcherType",
+        "none",
+        "--browser.gatherUsageStats",
+        "false"
       ]
     },
     {
-      "name": "Galaxy: Reproduce Pillars",
+      "name": "Galaxy: UI Human Test (Isolated User Library)",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "module": "galaxy.cli",
+      "module": "streamlit",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/src"
-      },
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
       "args": [
-        "reproduce",
-        "--config",
-        "${workspaceFolder}/artifacts/pillars/run_config.yaml",
-        "--workdir",
-        "${workspaceFolder}/artifacts/pillars"
+        "run",
+        "${workspaceFolder}/src/galaxy/ui.py",
+        "--server.fileWatcherType",
+        "none",
+        "--browser.gatherUsageStats",
+        "false",
+        "--",
+        "--scene-dir",
+        "${workspaceFolder}/artifacts/human-test-scenes"
       ]
     },
     {
-      "name": "Galaxy: Streamlit Discovery UI (Pillars)",
+      "name": "Galaxy: UI Open Selected Scene",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
@@ -87,88 +50,105 @@
       "console": "integratedTerminal",
       "env": {
         "PYTHONPATH": "${workspaceFolder}/src",
-        "GALAXY_UI_INPUT_PATH": "${workspaceFolder}/examples/pillars.yaml"
+        "GALAXY_UI_INPUT_PATH": "${input:sceneCard}"
       },
       "args": [
         "run",
-        "${workspaceFolder}/src/galaxy/ui.py"
+        "${workspaceFolder}/src/galaxy/ui.py",
+        "--server.fileWatcherType",
+        "none",
+        "--browser.gatherUsageStats",
+        "false"
       ]
     },
     {
-      "name": "Galaxy: Streamlit Discovery UI (S305 Offset)",
+      "name": "Galaxy: Validate Pillars Example",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "module": "streamlit",
+      "module": "galaxy.cli",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/src",
-        "GALAXY_UI_INPUT_PATH": "${workspaceFolder}/examples/s305_offset.yaml"
-      },
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
       "args": [
-        "run",
-        "${workspaceFolder}/src/galaxy/ui.py"
+        "validate-scene",
+        "--scene",
+        "${workspaceFolder}/artifacts/Pillars.json"
       ]
     },
     {
-      "name": "Galaxy: Streamlit Preview UI (Pillars)",
+      "name": "Galaxy: Validate Selected Scene",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "module": "streamlit",
+      "module": "galaxy.cli",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/src",
-        "GALAXY_UI_INPUT_PATH": "${workspaceFolder}/artifacts/pillars/exported_planes.fits"
-      },
-      "args": [
-        "run",
-        "${workspaceFolder}/src/galaxy/ui.py"
-      ]
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "args": ["validate-scene", "--scene", "${input:sceneCard}"]
     },
     {
-      "name": "Galaxy: Streamlit Preview UI (Pillars, Deconvolved)",
+      "name": "Galaxy: Run User Scene",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "module": "streamlit",
+      "module": "galaxy.cli",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/src",
-        "GALAXY_UI_INPUT_PATH": "${workspaceFolder}/artifacts/pillars/exported_planes_deconvolved.fits"
-      },
-      "args": [
-        "run",
-        "${workspaceFolder}/src/galaxy/ui.py"
-      ]
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "args": ["run", "--scene", "${input:userSceneCard}"]
     },
     {
-      "name": "Galaxy: Production Requirement Tests",
+      "name": "Galaxy: Reproduce User Scene",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "galaxy.cli",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "args": ["reproduce", "--scene", "${input:userSceneCard}"]
+    },
+    {
+      "name": "Galaxy: Human-Flow Automated Checks",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
       "module": "pytest",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/src"
-      },
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
       "args": [
         "-q",
-        "tests/test_cli.py",
-        "tests/test_config.py",
-        "tests/test_fitsio.py",
-        "tests/test_mast.py",
-        "tests/test_mapping_tone.py",
-        "tests/test_pipeline_modes.py",
-        "tests/test_planes_and_exports.py",
-        "tests/test_psf.py",
-        "tests/test_reprojection.py",
-        "tests/test_ui.py"
+        "tests/test_ui.py::test_streamlit_normal_launch_opens_pillars_example_and_inventory",
+        "tests/test_ui.py::test_example_save_creates_new_identity_without_modifying_source",
+        "tests/test_ui.py::test_pillars_inventory_is_remote_only_and_ignores_unreferenced_files"
       ]
+    },
+    {
+      "name": "Galaxy: Complete Offline Test Suite",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "module": "pytest",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "args": ["-q"]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "sceneCard",
+      "type": "promptString",
+      "description": "Scene-card JSON path",
+      "default": "artifacts/Pillars.json"
+    },
+    {
+      "id": "userSceneCard",
+      "type": "promptString",
+      "description": "User-owned scene-card JSON path (do not select a bundled example)",
+      "default": "artifacts/scenes/scene.scene.json"
     }
   ]
 }

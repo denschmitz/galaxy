@@ -1,17 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import logging
-from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 PROJECT_FORMAT_REVISION = 1
-logger = logging.getLogger(__name__)
-
 
 class GalaxyProjectModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -270,56 +265,3 @@ class GalaxyConfig(GalaxyProjectModel):
         if has_pinned_sources and self.target is None and self.canvas.center.mode != "explicit":
             raise ValueError("pinned source_products require either target metadata or an explicit canvas center")
         return self
-
-    def to_yaml(self) -> str:
-        return yaml.safe_dump(self.model_dump(mode="json", exclude_none=True), sort_keys=False)
-
-
-def load_config(path: str | Path) -> GalaxyConfig:
-    source = Path(path)
-    data = yaml.safe_load(source.read_text(encoding="utf-8"))
-    config, issues = validate_config_document(data)
-    if config is None:
-        for issue in issues:
-            severity = logging.ERROR if issue.code in {"unknown_field", "unsupported_format_revision", "unsupported_section_combination"} else logging.ERROR
-            logger.log(severity, "Project file validation failed at %s [%s]: %s", issue.path, issue.code, issue.message)
-        raise GalaxyProjectValidationError(issues)
-    return config
-
-
-def dump_config(config: GalaxyConfig, path: str | Path) -> None:
-    Path(path).write_text(config.to_yaml(), encoding="utf-8")
-
-
-def validate_config_dict(data: dict[str, Any]) -> tuple[GalaxyConfig | None, list[str]]:
-    config, issues = validate_config_document(data)
-    return config, [_format_issue(issue) for issue in issues]
-
-
-def validate_config_document(data: Any) -> tuple[GalaxyConfig | None, list[ValidationIssue]]:
-    if not isinstance(data, dict):
-        return None, [ValidationIssue(code="schema", path="<root>", message="project document must contain a mapping at the top level")]
-    try:
-        return GalaxyConfig.model_validate(data), []
-    except ValidationError as exc:
-        return None, _build_validation_issues(exc)
-
-
-def _build_validation_issues(exc: ValidationError) -> list[ValidationIssue]:
-    issues: list[ValidationIssue] = []
-    for error in exc.errors():
-        path = ".".join(str(part) for part in error["loc"]) or "<root>"
-        code = str(error.get("type") or "schema")
-        message = str(error["msg"])
-        if code == "extra_forbidden":
-            code = "unknown_field"
-        elif "unsupported format revision" in message:
-            code = "unsupported_format_revision"
-        elif "pinned source_products" in message or "project must define either" in message:
-            code = "unsupported_section_combination"
-        issues.append(ValidationIssue(code=code, path=path, message=message))
-    return issues
-
-
-def _format_issue(issue: ValidationIssue) -> str:
-    return f"{issue.path}: [{issue.code}] {issue.message}"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from galaxy.config import ToneConfig
+from galaxy.processing_config import ToneConfig
 
 
 def apply_tone(channels: dict[str, np.ndarray], tone: ToneConfig, bit_depth: int = 16) -> np.ndarray:

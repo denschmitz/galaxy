@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from galaxy import reprojection
-from galaxy.config import CanvasConfig
+from galaxy.processing_config import CanvasConfig
 from galaxy.fitsio import FITSPlane
 from galaxy.reprojection import build_output_wcs, derive_reference_output_wcs, reproject_plane
 

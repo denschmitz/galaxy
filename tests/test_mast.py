@@ -2,18 +2,61 @@ from pathlib import Path
 import uuid
 
 import numpy as np
+import pytest
 
-from galaxy.config import SearchConfig
+from galaxy.processing_config import SearchConfig
 from galaxy.mast import (
+    ArchiveQueryStatus,
+    SearchResult,
     apply_selection_policy,
     build_candidate_manifest,
     build_candidates,
     discover_candidates,
+    download_selected,
     filter_products,
     rank_product,
+    query_archive_outcome,
     select_products,
 )
 from galaxy.selection import SelectionInputs, load_candidate_manifest, write_candidate_manifest
+
+
+@pytest.mark.parametrize(
+    ("result", "status"),
+    [
+        (SearchResult([], []), ArchiveQueryStatus.EMPTY),
+        (SearchResult([], [], complete=False, message="page 2 unavailable"), ArchiveQueryStatus.INCOMPLETE),
+    ],
+)
+def test_archive_query_outcome_distinguishes_empty_and_incomplete(result, status) -> None:
+    outcome = query_archive_outcome(
+        "circle", {"ra": 1.0, "dec": 2.0, "radius": 0.1}, SearchConfig(),
+        query=lambda *args, **kwargs: result,
+    )
+    assert outcome.status is status
+
+
+def test_archive_query_outcome_distinguishes_failure() -> None:
+    outcome = query_archive_outcome(
+        "circle", {"ra": 1.0, "dec": 2.0, "radius": 0.1}, SearchConfig(),
+        query=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("MAST offline")),
+    )
+    assert outcome.status is ArchiveQueryStatus.FAILED
+    assert outcome.message == "MAST offline"
+
+
+def test_unavailable_download_reports_exact_selected_product(tmp_path, monkeypatch) -> None:
+    candidate = build_candidates([_sample_products()[0]])[0]
+    candidate.selected = True
+    monkeypatch.setattr(
+        "galaxy.mast.Observations.download_file",
+        lambda *args, **kwargs: ("ERROR", "not found", "mast:missing"),
+    )
+    downloaded, skipped = download_selected([candidate], tmp_path)
+    assert downloaded == []
+    assert skipped[0]["candidate_id"] == candidate.candidate_id
+    assert skipped[0]["stable_product_identifier"] == "jwst_a_i2d.fits"
+    assert skipped[0]["reason"] == "not found"
 
 
 def _make_temp_dir() -> Path:

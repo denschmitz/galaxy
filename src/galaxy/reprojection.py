@@ -12,7 +12,7 @@ import numpy as np
 from reproject.adaptive.core import _reproject_adaptive_2d
 from reproject.interpolation.core import _reproject_full
 
-from galaxy.config import CanvasConfig
+from galaxy.processing_config import CanvasConfig
 from galaxy.fitsio import FITSPlane
 
 
