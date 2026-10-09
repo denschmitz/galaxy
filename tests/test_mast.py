@@ -13,6 +13,7 @@ from galaxy.mast import (
     build_candidates,
     discover_candidates,
     download_selected,
+    _enrich_products,
     filter_products,
     rank_product,
     query_archive_outcome,
@@ -218,6 +219,101 @@ def test_apply_selection_policy_can_keep_deepest_per_filter() -> None:
         if item.selected
     ]
     assert selected == ["jwst_c_i2d.fits", "jwst_a_i2d.fits", "hst_b_drc.fits"]
+
+
+def test_product_enrichment_uses_parent_observation_metadata() -> None:
+    products = [{"obsID": "component-1", "parent_obsid": "parent-1", "productFilename": "component_i2d.fits"}]
+    metadata = {
+        "parent-1": {
+            "_obs_exptime": 123.0,
+            "_obs_instrument": "NIRCAM/IMAGE",
+            "_obs_s_region": "POLYGON ICRS 1 2 3 4 5 6",
+        }
+    }
+
+    enriched = _enrich_products(products, metadata)
+
+    assert enriched[0]["_obs_exptime"] == 123.0
+    assert enriched[0]["_obs_instrument"] == "NIRCAM/IMAGE"
+    assert enriched[0]["_obs_s_region"].startswith("POLYGON")
+
+
+def test_selection_prefers_level3_association_mosaic_within_parent_observation() -> None:
+    products = [
+        {
+            "obsID": "association",
+            "parent_obsid": "89223710",
+            "filters": "F090W",
+            "productType": "SCIENCE",
+            "productFilename": "jw02739-o001_t001_nircam_clear-f090w_i2d.fits",
+            "productSubGroupDescription": "I2D",
+            "calib_level": 3,
+            "_obs_collection": "JWST",
+            "_obs_instrument": "NIRCAM/IMAGE",
+            "dataURI": "mast:JWST/product/jw02739-o001_t001_nircam_clear-f090w_i2d.fits",
+        },
+        {
+            "obsID": "detector-a4",
+            "parent_obsid": "89223710",
+            "filters": "F090W",
+            "productType": "SCIENCE",
+            "productFilename": "jw02739001004_04101_00005_nrca4_i2d.fits",
+            "productSubGroupDescription": "I2D",
+            "calib_level": 2,
+            "_obs_collection": "JWST",
+            "_obs_instrument": "NIRCAM/IMAGE",
+            "dataURI": "mast:JWST/product/jw02739001004_04101_00005_nrca4_i2d.fits",
+        },
+    ]
+
+    selected = apply_selection_policy(
+        build_candidates(products),
+        SearchConfig(observation_selection="deepest_per_filter", max_observations_per_filter=1),
+    )
+
+    by_name = {candidate.product_filename: candidate for candidate in selected}
+    assert by_name["jw02739-o001_t001_nircam_clear-f090w_i2d.fits"].selected
+    assert not by_name["jw02739001004_04101_00005_nrca4_i2d.fits"].selected
+    assert by_name["jw02739001004_04101_00005_nrca4_i2d.fits"].selected_reason == (
+        "dropped:lower_ranked_product_in_observation_filter"
+    )
+
+
+def test_deepest_selection_ranks_known_exposure_ahead_of_unknown_depth() -> None:
+    products = [
+        {
+            "obsID": "known",
+            "parent_obsid": "known-parent",
+            "filters": "F200W",
+            "productType": "SCIENCE",
+            "productFilename": "known_i2d.fits",
+            "productSubGroupDescription": "I2D",
+            "calib_level": 3,
+            "_obs_exptime": 100.0,
+            "_obs_collection": "JWST",
+            "dataURI": "mast:known",
+        },
+        {
+            "obsID": "unknown",
+            "parent_obsid": "unknown-parent",
+            "filters": "F200W",
+            "productType": "SCIENCE",
+            "productFilename": "unknown_i2d.fits",
+            "productSubGroupDescription": "I2D",
+            "calib_level": 3,
+            "_obs_collection": "JWST",
+            "dataURI": "mast:unknown",
+        },
+    ]
+
+    selected = apply_selection_policy(
+        build_candidates(products),
+        SearchConfig(observation_selection="deepest_per_filter", max_observations_per_filter=1),
+    )
+
+    by_name = {candidate.product_filename: candidate for candidate in selected}
+    assert by_name["known_i2d.fits"].selected
+    assert by_name["unknown_i2d.fits"].selected_reason == "dropped:unknown_depth_not_selected"
 
 
 def test_apply_selection_policy_all_selects_best_candidate_per_observation_filter() -> None:

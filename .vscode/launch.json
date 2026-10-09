@@ -62,7 +62,7 @@
       ]
     },
     {
-      "name": "Galaxy: Validate Pillars Example",
+      "name": "Galaxy: Validate Pillars User Copy",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
@@ -73,7 +73,7 @@
       "args": [
         "validate-scene",
         "--scene",
-        "${workspaceFolder}/artifacts/Pillars.json"
+        "${workspaceFolder}/artifacts/scenes/Pillars.json"
       ]
     },
     {
@@ -120,9 +120,10 @@
       "env": { "PYTHONPATH": "${workspaceFolder}/src" },
       "args": [
         "-q",
-        "tests/test_ui.py::test_streamlit_normal_launch_opens_pillars_example_and_inventory",
-        "tests/test_ui.py::test_example_save_creates_new_identity_without_modifying_source",
-        "tests/test_ui.py::test_pillars_inventory_is_remote_only_and_ignores_unreferenced_files"
+        "tests/test_ui.py::test_streamlit_normal_launch_opens_materialized_pillars_and_inventory",
+        "tests/test_ui.py::test_streamlit_example_duplicate_confirms_json_only_overwrite",
+        "tests/test_ui.py::test_example_open_prefers_existing_user_copy",
+        "tests/test_ui.py::test_example_entry_uses_thumbnail_from_user_copy"
       ]
     },
     {
@@ -142,7 +143,7 @@
       "id": "sceneCard",
       "type": "promptString",
       "description": "Scene-card JSON path",
-      "default": "artifacts/Pillars.json"
+      "default": "artifacts/scenes/Pillars.json"
     },
     {
       "id": "userSceneCard",

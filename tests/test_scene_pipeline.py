@@ -9,12 +9,17 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from galaxy import cli
+from galaxy.background import estimate_background
 import galaxy.scene_pipeline as scene_pipeline_module
 from galaxy.scene_card import document, edit_scene, load_scene, save_scene
 from galaxy.scene_execution import SceneNotReadyError, prepare_scene_execution
 from galaxy.scene_models import SceneCard
 from galaxy.scene_pipeline import run_scene_pipeline
 from galaxy.pipeline import PipelineCancelled
+from galaxy.planes import load_multiplane_records
+from galaxy.processing_config import (
+    BackgroundConfig, BackgroundEstimatorConfig, SkyRectangleConfig,
+)
 from galaxy.render_jobs import request_cancellation_before_departure, start_render_job
 from galaxy.mast import download_selected
 from galaxy.selection import CandidateManifest, CandidateRecord, SelectionInputs, write_candidate_manifest
@@ -85,6 +90,27 @@ def test_prepare_scene_execution_preserves_exact_pins_and_has_no_yaml(tmp_path: 
     assert launch.config.mapping.planes[0].plane == "source"
 
 
+def test_prepare_scene_execution_keeps_resolved_name_out_of_processing_target(
+    tmp_path: Path,
+) -> None:
+    path, card = _card(tmp_path)
+    card = edit_scene(card, {"target": {
+        "name": "horsehead nebula",
+        "resolved_name": "Horsehead Nebula",
+        "ra_deg": 85.24583333,
+        "dec_deg": -2.45833333,
+        "coordinate_frame": "ICRS",
+        "region": {"kind": "box", "width_arcmin": 2.0, "height_arcmin": 2.0},
+    }})
+
+    launch = prepare_scene_execution(card, path)
+
+    assert launch.card.target.resolved_name == "Horsehead Nebula"
+    assert launch.config.target.name == "horsehead nebula"
+    assert "resolved_name" not in launch.config.target.model_dump()
+    assert "coordinate_frame" not in launch.config.target.model_dump()
+
+
 def test_scene_pipeline_uses_local_pin_records_history_and_writes_no_yaml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -105,6 +131,17 @@ def test_scene_pipeline_uses_local_pin_records_history_and_writes_no_yaml(
     assert record.inputs.selection.selected_product_ids == ["mast:exact-v1"]
     assert reopened.assets[record.image_asset_id].kind == "render_image"
     assert reopened.assets[record.image_asset_id].sha256 is not None
+    assert record.high_depth_image_asset_id is not None
+    assert reopened.assets[record.high_depth_image_asset_id].kind == "render_image"
+    assert record.checkpoint_manifest_asset_id is not None
+    checkpoint_asset = reopened.assets[record.checkpoint_manifest_asset_id]
+    assert checkpoint_asset.kind == "checkpoint_manifest"
+    assert (path.parent / checkpoint_asset.path).is_file()
+    assert result.artifacts.planes_path == result.artifacts.workdir / "original" / "aligned-planes.fits"
+    assert result.artifacts.checkpoint_manifest_path == result.artifacts.workdir / "original" / "aligned-checkpoint.json"
+    assert result.artifacts.png_path == result.artifacts.workdir / "original" / "composite.png"
+    assert result.artifacts.tiff_path == result.artifacts.workdir / "original" / "composite.tiff"
+    assert (result.artifacts.workdir / "original" / "aligned").is_dir()
     assert reopened.assets[record.provenance_asset_id].kind == "provenance"
     assert record.thumbnail_asset_id == reopened.thumbnail_asset_id
     thumbnail = reopened.assets[record.thumbnail_asset_id]
@@ -116,6 +153,87 @@ def test_scene_pipeline_uses_local_pin_records_history_and_writes_no_yaml(
     assert [item["candidate_id"] for item in candidates["candidates"] if item["selected"]] == ["mast:exact-v1"]
     provenance = json.loads(result.artifacts.provenance_path.read_text())
     assert provenance["selection"]["source"] == "pinned_scene_card"
+    assert provenance["stage_records"][0]["stage_id"] == "aligned_checkpoint"
+    assert provenance["stage_records"][0]["branch"] == "original"
+    assert provenance["stage_records"][0]["output_content_identity"]["sha256"]
+
+
+def test_first_render_replaces_provisional_search_frame_and_persists_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, card = _card(tmp_path)
+    canvas = document(card.canvas)
+    canvas["width"] = 1
+    canvas["height"] = 1
+    canvas["frame_origin"] = "search_region"
+    provisional = edit_scene(card, {"canvas": canvas})
+    save_scene(provisional, path, expected_previous=card, now=NOW)
+    monkeypatch.setattr("galaxy.pipeline.discover_candidates",
+                        lambda *args, **kwargs: pytest.fail("pinned run must not discover"))
+    monkeypatch.setattr("galaxy.pipeline.download_selected",
+                        lambda *args, **kwargs: pytest.fail("local pin must not download"))
+
+    result = run_scene_pipeline(path)
+    reopened = load_scene(path)
+
+    assert reopened == result.card
+    assert reopened.canvas.frame_origin == "selected_footprints"
+    assert reopened.canvas.width > 1 and reopened.canvas.height > 1
+    assert reopened.content_revision == provisional.content_revision + 1
+    assert reopened.renders[0].inputs.canvas.frame_origin == "selected_footprints"
+    assert result.artifacts.effective_canvas == document(reopened.canvas)
+
+
+def test_applied_background_survives_reopen_and_registers_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, _ = _card(tmp_path)
+    monkeypatch.setattr("galaxy.pipeline.discover_candidates",
+                        lambda *args, **kwargs: pytest.fail("pinned run must not discover"))
+    monkeypatch.setattr("galaxy.pipeline.download_selected",
+                        lambda *args, **kwargs: pytest.fail("local pin must not download"))
+    baseline = run_scene_pipeline(path)
+    planes = load_multiplane_records(baseline.artifacts.planes_path)
+    ra, dec = planes[0].wcs.pixel_to_world_values(1.5, 1.5)
+    background = BackgroundConfig(
+        mode="pedestal",
+        black_reference_policy="corrected_zero",
+        inclusion_regions=[SkyRectangleConfig(
+            region_id="sky", center_ra_deg=float(ra), center_dec_deg=float(dec),
+            width_arcsec=0.35, height_arcsec=0.35,
+        )],
+        estimator=BackgroundEstimatorConfig(
+            minimum_samples=4, minimum_valid_fraction=0.25,
+        ),
+    )
+    proposal = estimate_background(planes, background)
+    applied = edit_scene(baseline.card, {"background": {
+        **background.model_dump(mode="json"),
+        "resolved_branches": {
+            "original": {
+                key: value.model_dump(mode="json", exclude_none=True)
+                for key, value in proposal.resolved_planes.items()
+            }
+        },
+    }})
+    saved = save_scene(applied, path, expected_previous=baseline.card)
+    assert load_scene(path).background.mode == "pedestal"
+
+    corrected = run_scene_pipeline(path)
+    reopened = load_scene(path)
+    record = reopened.renders[-1]
+    assert corrected.card == reopened
+    assert record.content_revision == saved.content_revision
+    assert record.background_diagnostic_asset_ids is not None
+    assert {reopened.assets[asset_id].kind for asset_id in record.background_diagnostic_asset_ids} == {
+        "background_diagnostic", "background_region_overlay",
+    }
+    for asset_id in record.background_diagnostic_asset_ids:
+        assert (path.parent / reopened.assets[asset_id].path).is_file()
+    provenance = json.loads(corrected.artifacts.provenance_path.read_text())
+    stage = next(item for item in provenance["stage_records"]
+                 if item["stage_id"] == "background_pedestal")
+    assert stage["branch"] == "original"
 
 
 def test_scene_pipeline_rejects_mapping_after_actual_plane_inspection(tmp_path: Path) -> None:
@@ -141,6 +259,25 @@ def test_scene_workdir_cannot_overwrite_registered_render_assets(tmp_path: Path)
     with pytest.raises(ValueError, match="immutable registered asset"):
         run_scene_pipeline(path, first.artifacts.workdir)
     assert first.artifacts.png_path.read_bytes() == before
+
+
+def test_canvas_change_can_replace_unreferenced_reprojections(tmp_path: Path) -> None:
+    path, original = _card(tmp_path)
+    workdir = tmp_path / "Pillars" / "retained-render"
+    first = run_scene_pipeline(path, workdir)
+    source_before = (tmp_path / "source.fits").read_bytes()
+    first.artifacts.png_path.write_bytes(b"obsolete preview")
+
+    canvas = document(original.canvas)
+    canvas["rotation_deg"] = 5.0
+    changed = edit_scene(original, {"canvas": canvas})
+    # Example JSON replacement may intentionally leave the old asset folder in place.
+    path.write_text(json.dumps(document(changed)), encoding="utf-8")
+
+    second = run_scene_pipeline(path, workdir)
+    assert second.artifacts.png_path.read_bytes() != b"obsolete preview"
+    assert (tmp_path / "source.fits").read_bytes() == source_before
+    assert load_scene(path).canvas.rotation_deg == 5.0
 
 
 def test_missing_local_pin_is_dependency_failure(tmp_path: Path) -> None:
@@ -220,7 +357,9 @@ def test_cancelled_pipeline_does_not_append_success_history(tmp_path: Path) -> N
 
     with pytest.raises(PipelineCancelled, match="cancelled"):
         run_scene_pipeline(path, progress=stages.append, cancel_requested=cancelled)
-    assert load_scene(path).renders is None
+    cancelled_card = load_scene(path)
+    assert cancelled_card.renders is None
+    assert all(asset.kind != "checkpoint_manifest" for asset in cancelled_card.assets.values())
 
 
 def test_background_render_job_reports_success(tmp_path: Path) -> None:

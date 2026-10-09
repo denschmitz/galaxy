@@ -10,32 +10,52 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from galaxy.background import (
+    BackgroundSamplingError, apply_background, background_masks, background_overlay_array,
+    background_selection_key, estimate_background,
+)
 from galaxy.app_config import ApplicationConfigError, ApplicationSettings, load_application_settings, parse_ui_startup_args
 from galaxy.discovery_sources import (
     DiscoverySourceQuery, YuvalHarpazLatestReleaseSource, discover_isolated,
 )
-from galaxy.discovery_cache import load_cached_candidates, save_cached_candidates
-from galaxy.mapping import CompositionInputs, compose_channels, default_plane_mappings
+from galaxy.discovery_cache import (
+    candidate_cache_directory,
+    load_cached_candidates,
+    save_cached_candidates,
+)
+from galaxy.mapping import default_plane_mappings
+from galaxy.normalization_reference import estimate_normalization_references
 from galaxy.mast import ArchiveQueryStatus, apply_selection_policy, build_candidate_manifest, query_archive_outcome
 from galaxy.planes import load_multiplane_records
+from galaxy.rendering import render_aligned_planes
 from galaxy.processing_config import (
-    MappingConfig, SearchConfig, StretchConfig, ToneConfig, ToneGainBias,
-    TonePercentiles, ToneStretchSet,
+    BackgroundConfig, BackgroundEstimatorConfig, CoverageConfig, MappingConfig, SearchConfig,
+    SkyRectangleConfig, StretchConfig, ToneConfig, ToneGainBias, TonePercentiles,
+    ToneStretchSet,
 )
 from galaxy.scene_card import asset_path, create_scene, document, edit_scene, load_scene
 from galaxy.scene_models import SceneCard
 from galaxy.render_jobs import RenderJob, request_cancellation_before_departure, start_render_job
 from galaxy.scene_workflow import (
-    LibraryEntry, LibraryOrigin, OperationPhase, Screen, apply_manifest_selection, default_scene_path,
+    LibraryEntry, LibraryOrigin, OperationPhase, Screen, apply_manifest_selection,
+    associated_asset_root, default_scene_path, delete_library_scene,
     discover_workspace_inputs, draft_from_discovery_hint, draft_from_resolver_match,
-    draft_from_target, duplicate_library_scene,
+    draft_from_target, duplicate_library_scene, example_user_path,
     export_current_render, initialize_canvas, inspect_scene_artifacts, list_project_library, matching_render,
-    manifest_from_card, materialize_render_defaults, render_issues, resolve_workdir_input, resize_canvas,
-    merge_render_completion, save_draft, save_example_as_user_scene,
+    manifest_from_card, manifest_from_scene_asset, materialize_render_defaults, persist_candidate_manifest,
+    render_issues, resolve_workdir_input, resize_canvas,
+    materialize_example, merge_render_completion, open_example_user_copy, save_draft,
+    selected_fits_paths,
 )
 from galaxy.selection import CandidateManifest, CandidateRecord, load_candidate_manifest
+from galaxy.selection_guidance import (
+    MISSION_SCOPES, SELECTION_MODES, apply_selection_mode, clear_selection,
+    grouped_candidates, recommendation_explanation, selection_summary as guidance_summary,
+    set_custom_selection,
+)
 from galaxy.targeting import ResolverOutcome, ResolverStatus, region_to_mast_shape, resolve_name, resolve_target
-from galaxy.tone import apply_tone
+from galaxy.tone import propose_auto_stretch
+from galaxy.viewport_framing import ViewportFitResult, fit_fits_paths, render_fit_preview
 
 
 SCREENS = [screen.value for screen in Screen]
@@ -101,17 +121,16 @@ def _initialize_session(settings: ApplicationSettings, explicit: Path | None) ->
     _startup_message(f"routing explicit startup input={explicit}")
     route = resolve_workdir_input(explicit)
     if route.kind == "scene":
-        origin = (
-            LibraryOrigin.BUNDLED_EXAMPLE
-            if route.path.parent == (settings.project_root / "artifacts").resolve()
-            else LibraryOrigin.USER_SCENE
-        )
-        _set_active_scene(load_scene(route.path), route.path, saved=True, origin=origin)
+        if route.path.parent == (settings.project_root / "examples").resolve():
+            card, path = open_example_user_copy(route.path, settings.scene_directory)
+            _set_active_scene(card, path, saved=True)
+        else:
+            _set_active_scene(load_scene(route.path), route.path, saved=True)
     elif route.kind == "manifest":
         manifest = load_candidate_manifest(route.path)
-        st.session_state["candidate_manifest"] = manifest
         card = _card_for_manifest(manifest)
         _set_active_scene(card, None, saved=False)
+        st.session_state["candidate_manifest"] = manifest
     else:
         state["planes_path"] = route.path
         state["screen"] = Screen.RENDER.value
@@ -140,13 +159,27 @@ def _set_active_scene(
     card: SceneCard, path: Path | None, *, saved: bool,
     origin: LibraryOrigin = LibraryOrigin.USER_SCENE,
 ) -> None:
+    for key in list(st.session_state):
+        if key.startswith("bridge-enabled-"):
+            st.session_state.pop(key, None)
     st.session_state["active_card"] = card
     st.session_state["active_path"] = path
     st.session_state["saved_document"] = document(card) if saved else None
     st.session_state["active_origin"] = origin.value
     st.session_state["planes_path"] = None
+    st.session_state["candidate_manifest"] = None
+    st.session_state.pop("candidate_manifest_error", None)
+    if path is not None:
+        try:
+            st.session_state["candidate_manifest"] = manifest_from_scene_asset(card, path)
+        except (OSError, ValueError) as exc:
+            st.session_state["candidate_manifest_error"] = str(exc)
     st.session_state["screen"] = Screen.REFINEMENT.value
-    for key in ("candidate-editor", "render-branch", "output-overwrite"):
+    for key in (
+        "candidate-editor", "candidate-group-editor", "candidate-alternative-editor",
+        "candidate-group-choice", "selection-mode", "mission-scope", "render-branch",
+        "output-overwrite", "pending_project_delete", "pending_viewport_fit",
+    ):
         st.session_state.pop(key, None)
 
 
@@ -168,6 +201,12 @@ def _request_scene_replacement(
     return True
 
 
+def _render_launch_needs_save(
+    card: SceneCard, active_path: Path | None, saved_document: dict[str, Any] | None,
+) -> bool:
+    return active_path is None or document(card) != saved_document
+
+
 def _is_dirty() -> bool:
     card = st.session_state.get("active_card")
     if card is None:
@@ -185,8 +224,6 @@ def _render_app(settings: ApplicationSettings) -> None:
     card = st.session_state.get("active_card")
     if card is not None:
         marker = "Unsaved changes" if _is_dirty() else "Saved"
-        if st.session_state.get("active_origin") == LibraryOrigin.BUNDLED_EXAMPLE.value:
-            marker = f"Bundled example - {marker}"
         st.sidebar.caption(f"{card.title} - {marker}")
         if st.sidebar.button("Close active scene"):
             st.session_state["pending_close"] = True
@@ -259,7 +296,7 @@ def _close_active_scene() -> None:
     for key in (
         "active_card", "active_path", "active_origin", "saved_document", "candidate_manifest", "planes_path",
         "pending_close", "render_job", "render_job_applied", "candidate-editor",
-        "render-branch", "output-overwrite",
+        "render-branch", "output-overwrite", "pending_project_delete", "pending_viewport_fit",
     ):
         st.session_state.pop(key, None)
     st.session_state["screen"] = Screen.DISCOVERY.value
@@ -290,12 +327,9 @@ def _save_active(settings: ApplicationSettings) -> bool:
         st.error("No active scene.")
         return False
     try:
-        if st.session_state.get("active_origin") == LibraryOrigin.BUNDLED_EXAMPLE.value:
-            committed, path = save_example_as_user_scene(card, settings.scene_directory)
-        else:
-            committed, path = save_draft(
-                card, settings.scene_directory, st.session_state.get("active_path")
-            )
+        committed, path = save_draft(
+            card, settings.scene_directory, st.session_state.get("active_path")
+        )
     except (OSError, ValueError) as exc:
         st.session_state["operation_phase"] = OperationPhase.FAILED.value
         st.error(f"Scene save failed: {exc}")
@@ -310,11 +344,7 @@ def _save_active(settings: ApplicationSettings) -> bool:
 
 
 def _save_label(default: str) -> str:
-    return (
-        "Save as new scene"
-        if st.session_state.get("active_origin") == LibraryOrigin.BUNDLED_EXAMPLE.value
-        else default
-    )
+    return default
 
 
 def _render_discovery(settings: ApplicationSettings) -> None:
@@ -467,12 +497,32 @@ def _query_candidates(card: SceneCard) -> CandidateManifest:
     return build_candidate_manifest(outcome.result.candidates, search)
 
 
+def _render_bridge(card: SceneCard) -> None:
+    job: RenderJob | None = st.session_state.get("render_job")
+    running = job is not None and job.snapshot().phase is OperationPhase.RUNNING
+    current = card.bridge.enabled if card.bridge is not None else True
+    selected = st.toggle(
+        "Bridge small NaN holes", value=current, disabled=running,
+        key=f"bridge-enabled-{card.scene_id}",
+        help=("On estimates eligible small enclosed bright-core holes for presentation. "
+              "Off preserves strict missing data. Changing this setting requires reprojection; "
+              "rejected holes remain invalid."),
+    )
+    if not running and selected != current:
+        st.session_state["active_card"] = edit_scene(card, {"bridge": {"enabled": selected}})
+        card = st.session_state["active_card"]
+    if card.renders and matching_render(card) is None:
+        st.caption("Preview is out of date. Generate preview to reproject with the current bridge setting.")
+
+
 def _render_refinement(settings: ApplicationSettings) -> None:
     st.title("Scene refinement")
     card: SceneCard | None = st.session_state.get("active_card")
     if card is None:
         st.info("Choose a target or open a saved scene from Discovery.")
         return
+    _render_bridge(card)
+    card = st.session_state["active_card"]
     st.caption(card.target.resolved_name or card.target.name if card.target else card.title)
     data_tab, color_tab, frame_tab, artifacts_tab = st.tabs(["Data", "Color", "Frame", "Artifacts"])
     with data_tab:
@@ -498,7 +548,21 @@ def _render_refinement(settings: ApplicationSettings) -> None:
         st.session_state["screen"] = Screen.DISCOVERY.value
         st.rerun()
     if issues:
-        with st.expander(f"Render needs {len(issues)} correction(s)"):
+        if card.selection is None or not card.selection.selected_product_ids:
+            st.info("Next steps")
+            st.markdown(
+                "1. Choose a selection mode and scope\n"
+                "2. Review the proposed products\n"
+                "3. Apply the selection\n"
+                "4. Review color and frame\n"
+                "5. Render"
+            )
+        elif card.mapping is None or card.tone is None:
+            st.info("Next: apply the recommended color, tone, and frame defaults.")
+        else:
+            st.warning("Review the remaining setup items before rendering.")
+        with st.expander("Technical readiness details"):
+            st.caption(f"{len(issues)} field-level correction(s)")
             for issue in issues:
                 st.write(f"{issue.path}: {issue.message}")
 
@@ -518,11 +582,24 @@ def _render_artifacts(card: SceneCard, card_path: Path | None) -> None:
     }
     for label, count in counts.items():
         st.write(f"{label}: {count}")
+    for warning in inventory.warnings:
+        st.warning(warning)
     if inventory.sources:
         st.dataframe(pd.DataFrame([{
             "mission": item.mission or "unknown", "filter": item.filter_name or "unknown",
             "processing_level": item.processing_level or "unknown",
             "product_id": item.product_id, "filename": item.filename or "unknown",
+            "native_unit": item.native_unit or "unknown",
+            "mask_sources": ", ".join(item.mask_sources) if item.mask_sources else "none",
+            "normalization": item.normalization_mode,
+            "black_percentile": item.black_percentile if item.black_percentile is not None else "unknown",
+            "white_percentile": item.white_percentile if item.white_percentile is not None else "unknown",
+            "plane_gain": item.plane_gain,
+            "valid_coverage": (
+                f"{item.valid_coverage_fraction:.1%}"
+                if item.valid_coverage_fraction is not None else "unknown"
+            ),
+            "rgb_contribution": _format_rgb_contribution(item.rgb_contribution_percent),
             "status": item.status,
         } for item in inventory.sources]), use_container_width=True, hide_index=True)
     else:
@@ -544,11 +621,23 @@ def _render_artifacts(card: SceneCard, card_path: Path | None) -> None:
         st.info("Render history: None created")
 
 
+def _format_rgb_contribution(value: dict[str, float] | None) -> str:
+    if not value:
+        return "unknown"
+    return " / ".join(
+        f"{channel[0].upper()} {float(value.get(channel, 0.0)):.1f}%"
+        for channel in ("red", "green", "blue")
+    )
+
+
 def _render_data(card: SceneCard, settings: ApplicationSettings) -> None:
     manifest: CandidateManifest | None = st.session_state.get("candidate_manifest")
+    persist_manifest = manifest is not None
     if manifest is None:
         manifest = manifest_from_card(card)
-    cache_directory = settings.scene_directory / ".discovery-cache"
+    if st.session_state.get("candidate_manifest_error"):
+        st.warning(f"Saved candidate list is unavailable: {st.session_state['candidate_manifest_error']}")
+    cache_directory = candidate_cache_directory(settings.scene_directory)
     try:
         cached = load_cached_candidates(cache_directory, card)
     except (OSError, ValueError) as exc:
@@ -562,11 +651,8 @@ def _render_data(card: SceneCard, settings: ApplicationSettings) -> None:
         on_change=_widget_changed, args=("force-refresh",),
     )
     reuse_stale = st.checkbox(
-        "Explicitly reuse stale cached candidates",
-        value=False,
-        key="reuse-stale",
-        on_change=_widget_changed,
-        args=("reuse-stale",),
+        "Explicitly reuse stale cached candidates", value=False, key="reuse-stale",
+        on_change=_widget_changed, args=("reuse-stale",),
         disabled=cached is None or not cached.stale,
     )
     if st.button("Query MAST observations and products"):
@@ -586,8 +672,12 @@ def _render_data(card: SceneCard, settings: ApplicationSettings) -> None:
                 st.session_state["operation_message"] = (
                     f"Queried MAST and cached candidates at {manifest.generated_at}"
                 )
+            scene_path = st.session_state.get("active_path") or default_scene_path(card, settings.scene_directory)
+            card, _ = persist_candidate_manifest(card, scene_path, manifest)
+            st.session_state["active_card"] = card
             st.session_state["candidate_manifest"] = manifest
-            st.session_state.pop("candidate-editor", None)
+            for key in ("candidate-group-editor", "candidate-alternative-editor"):
+                st.session_state.pop(key, None)
             st.session_state["operation_phase"] = OperationPhase.SUCCEEDED.value
         except Exception as exc:
             st.session_state["operation_phase"] = OperationPhase.FAILED.value
@@ -596,50 +686,146 @@ def _render_data(card: SceneCard, settings: ApplicationSettings) -> None:
     if manifest is None:
         st.info("Query MAST to compare available observations and exact products.")
         return
-    policy = manifest.selection_policy
-    st.info(f"Recommended selection policy: {policy}. Apply is explicit; missing metadata is shown as unknown.")
-    manifest = _candidate_editor(manifest)
-    st.session_state["candidate_manifest"] = manifest
-    if st.button("Apply selected products and recommended defaults"):
+
+    mode = st.radio(
+        "Selection mode", list(SELECTION_MODES),
+        index=list(SELECTION_MODES).index(manifest.selection_mode),
+        format_func=SELECTION_MODES.get, key="selection-mode",
+    )
+    available_missions = {str(item.mission or "").upper() for item in manifest.candidates}
+    scope_options = [
+        key for key in MISSION_SCOPES
+        if key == "all" or key.upper() in available_missions
+    ]
+    if manifest.mission_scope not in scope_options:
+        manifest = apply_selection_mode(manifest, mode, "all")
+    scope = st.radio(
+        "Mission scope", scope_options,
+        index=scope_options.index(manifest.mission_scope),
+        format_func=MISSION_SCOPES.get, key="mission-scope", horizontal=True,
+    )
+    if mode != manifest.selection_mode or scope != manifest.mission_scope:
+        manifest = apply_selection_mode(manifest, mode, scope)
+    st.caption(
+        "Preview is a quick-look subset. Full filter set keeps one recommended product "
+        "per mission, instrument, and filter. Custom keeps exact manual choices."
+    )
+    available_missions = {str(item.mission or "").upper() for item in manifest.candidates}
+    for required_mission in ("HST", "JWST"):
+        if required_mission not in available_missions:
+            st.caption(f"{required_mission} scope unavailable: no matching candidates found.")
+    summary_slot = st.empty()
+    manifest = _guided_candidate_editor(manifest)
+    summary = guidance_summary(manifest)
+    unknown_suffix = (
+        f" · {summary.unknown_size_products} unknown sizes"
+        if summary.unknown_size_products else ""
+    )
+    summary_slot.write(
+        f"{summary.mode_label} · {summary.selected_products} products · "
+        f"{summary.filter_count} filters · {summary.mission_count} missions · "
+        f"{summary.instrument_count} instruments · "
+        f"{_format_download_size(summary.known_download_bytes)}{unknown_suffix}"
+    )
+    st.caption(f"{summary.available_products} unique products available in {len(grouped_candidates(manifest))} groups.")
+    clear_col, restore_col = st.columns(2)
+    if clear_col.button("Clear selection"):
+        manifest = clear_selection(manifest)
+        st.session_state["candidate_manifest"] = manifest
+        st.rerun()
+    if restore_col.button("Restore mode recommendation"):
+        restore_mode = mode if mode != "custom" else manifest.recommendation_mode
+        manifest = apply_selection_mode(manifest, restore_mode, scope)
+        st.session_state["candidate_manifest"] = manifest
+        st.rerun()
+
+    if persist_manifest:
+        scene_path = st.session_state.get("active_path") or default_scene_path(card, settings.scene_directory)
+        card, _ = persist_candidate_manifest(card, scene_path, manifest)
+        st.session_state["active_card"] = card
+        st.session_state["candidate_manifest"] = manifest
+    if summary.selected_products == 0:
+        st.warning("Select at least one product before applying the recommendation.")
+    if st.button(
+        "Apply selection and recommended defaults", disabled=summary.selected_products == 0,
+    ):
         try:
             updated = apply_manifest_selection(card, manifest)
-            updated = materialize_render_defaults(updated)
+            updated = materialize_render_defaults(updated, replace_existing=True)
             st.session_state["active_card"] = updated
+            st.session_state.pop("pending_viewport_fit", None)
             st.success("Exact product pins, filters, mapping, tone, and frame defaults applied.")
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
 
 
-def _candidate_editor(manifest: CandidateManifest) -> CandidateManifest:
+def _guided_candidate_editor(manifest: CandidateManifest) -> CandidateManifest:
+    groups = grouped_candidates(manifest)
     rows = [{
-        "include": item.selected, "observation": item.obs_id or item.obsid or "unknown",
-        "date": item.observation_date_start or "unknown", "mission": item.mission or "unknown",
-        "instrument": item.instrument or "unknown", "filter": item.filter_name or "unknown",
-        "exposure_seconds": item.exposure_time if item.exposure_time is not None else "unknown",
-        "product": item.product_filename or item.candidate_id,
-        "recommendation_basis": item.auto_selection_reason,
-        "candidate_id": item.candidate_id,
-    } for item in manifest.candidates]
+        "include": group.recommended.selected,
+        "mission": group.key[0], "instrument": group.key[1], "filter": group.key[2],
+        "recommended_product": group.recommended.product_filename or group.recommended.candidate_id,
+        "alternatives": len(group.alternatives),
+        "why": recommendation_explanation(group.recommended),
+        "candidate_id": group.recommended.candidate_id,
+    } for group in groups]
     edited = st.data_editor(
         pd.DataFrame(rows), use_container_width=True, hide_index=True,
-        key="candidate-editor", on_change=_widget_changed, args=("candidate-editor",),
+        key="candidate-group-editor", on_change=_widget_changed, args=("candidate-group-editor",),
     )
-    by_id = {item.candidate_id: item for item in manifest.candidates}
+    selected_ids = {item.candidate_id for item in manifest.candidates if item.selected}
+    changed = False
     for row in edited.to_dict("records"):
-        by_id[str(row["candidate_id"])].user_selected = bool(row["include"])
-    search = SearchConfig(
-        observation_selection=manifest.selection_policy,
-        max_observations_per_filter=manifest.max_observations_per_filter,
-    )
-    candidates = apply_selection_policy(manifest.candidates, search, manifest.selection_inputs)
-    return CandidateManifest(
-        generated_at=manifest.generated_at, config_path=manifest.config_path,
-        selection_policy=manifest.selection_policy,
-        max_observations_per_filter=manifest.max_observations_per_filter,
-        selection_inputs=manifest.selection_inputs, candidates=candidates,
-    )
+        candidate_id = str(row["candidate_id"])
+        include = bool(row["include"])
+        if include != (candidate_id in selected_ids):
+            changed = True
+        if include:
+            selected_ids.add(candidate_id)
+        else:
+            selected_ids.discard(candidate_id)
 
+    alternative_groups = [group for group in groups if group.alternatives]
+    if alternative_groups:
+        labels = {
+            " | ".join(group.key): group for group in alternative_groups
+        }
+        choice = st.selectbox("Inspect alternatives for", list(labels), key="candidate-group-choice")
+        chosen = labels[choice]
+        with st.expander(f"Show {len(chosen.alternatives)} alternatives — {choice}"):
+            alternative_rows = [{
+                "include": item.selected,
+                "product": item.product_filename or item.candidate_id,
+                "exposure_seconds": item.exposure_time if item.exposure_time is not None else "unknown",
+                "size_bytes": item.file_size if item.file_size is not None else "unknown",
+                "why": recommendation_explanation(item),
+                "candidate_id": item.candidate_id,
+            } for item in chosen.alternatives]
+            alternatives = st.data_editor(
+                pd.DataFrame(alternative_rows), use_container_width=True, hide_index=True,
+                key="candidate-alternative-editor", on_change=_widget_changed,
+                args=("candidate-alternative-editor",),
+            )
+            for row in alternatives.to_dict("records"):
+                candidate_id = str(row["candidate_id"])
+                include = bool(row["include"])
+                if include != (candidate_id in selected_ids):
+                    changed = True
+                if include:
+                    selected_ids.add(candidate_id)
+                else:
+                    selected_ids.discard(candidate_id)
+    return set_custom_selection(manifest, selected_ids) if changed else manifest
+
+
+def _format_download_size(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{value} B"
 
 def _render_color(card: SceneCard) -> None:
     if card.selection is None or not card.selection.selected_product_ids:
@@ -694,22 +880,99 @@ def _render_frame(card: SceneCard) -> None:
         value=float(canvas.get("rotation_deg", 0.0)),
     )
     if canvas != document(card.canvas):
+        canvas["frame_origin"] = "user"
         st.session_state["active_card"] = edit_scene(card, {"canvas": canvas})
+        st.session_state.pop("pending_viewport_fit", None)
+        card = st.session_state["active_card"]
+    active_path = st.session_state.get("active_path")
+    if st.button("Fit selected scans"):
+        if active_path is None:
+            st.error("Save the scene before fitting downloaded scans.")
+        else:
+            paths, identities, errors = selected_fits_paths(card, active_path)
+            if errors:
+                st.error("Selected footprints are not inspectable: " + "; ".join(errors))
+            else:
+                try:
+                    st.session_state["pending_viewport_fit"] = fit_fits_paths(paths, identities)
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+    pending: ViewportFitResult | None = st.session_state.get("pending_viewport_fit")
+    if pending is not None and not hasattr(pending, "boundaries_deg"):
+        st.session_state.pop("pending_viewport_fit", None)
+        pending = None
+        st.info("The fit-preview format changed. Run Fit selected scans again to rebuild it.")
+    if pending is not None:
+        diagnostics = pending.diagnostics
+        st.subheader("Fitted-frame preview")
+        st.write(
+            f"{diagnostics.width} x {diagnostics.height} pixels at "
+            f"{diagnostics.pixel_scale_arcsec:.4f} arcsec/pixel; "
+            f"{diagnostics.frame_width_deg * 60:.2f} x "
+            f"{diagnostics.frame_height_deg * 60:.2f} arcmin"
+        )
+        st.caption(
+            f"Components: {diagnostics.component_count}; span: "
+            f"{diagnostics.angular_span_deg:.3f} deg; fill: "
+            f"{diagnostics.fill_fraction:.1%}; estimated memory: "
+            f"{diagnostics.estimated_memory_bytes / (1024 ** 2):.1f} MiB"
+        )
+        center_data = pending.canvas["center"]
+        st.caption(
+            f"Center: {float(center_data['ra_deg']):.6f}, "
+            f"{float(center_data['dec_deg']):.6f} deg; rotation: "
+            f"{float(pending.canvas['rotation_deg']):.2f} deg; selected products: "
+            f"{len(pending.product_ids)}"
+        )
+        try:
+            st.image(
+                render_fit_preview(pending),
+                caption="Proposed selected-FITS boundaries and fitted canvas border",
+            )
+        except ValueError as exc:
+            st.error(f"Fitted-frame visualization failed: {exc}")
+        for warning in pending.warnings:
+            st.warning(warning)
+        if pending.warnings:
+            st.info("Revise the selection, continue with this fitted canvas, or keep the current canvas.")
+        apply_column, keep_column = st.columns(2)
+        if apply_column.button("Apply fitted canvas"):
+            current: SceneCard = st.session_state["active_card"]
+            st.session_state["active_card"] = edit_scene(current, {"canvas": pending.canvas})
+            st.session_state.pop("pending_viewport_fit", None)
+            st.rerun()
+        if keep_column.button("Keep current canvas"):
+            st.session_state.pop("pending_viewport_fit", None)
+            st.rerun()
     if st.button("Reset to target region"):
         try:
             st.session_state["active_card"] = initialize_canvas(card, reset=True)
+            st.session_state.pop("pending_viewport_fit", None)
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
-    footprint_assets = [
-        asset for asset in (card.assets or {}).values()
-        if asset.kind == "footprint" and asset.path and st.session_state.get("active_path")
-    ]
-    for asset in footprint_assets[-1:]:
-        path = asset_path(st.session_state["active_path"], asset)
-        if path.is_file():
-            st.image(str(path), caption="Selected-observation footprints and crop frame")
+    current_footprint = _current_footprint_path(card, active_path)
+    if pending is None and current_footprint is not None:
+        st.image(str(current_footprint), caption="Current rendered footprints and crop frame")
+    elif pending is None and any(
+        render.footprint_asset_id for render in (card.renders or [])
+    ):
+        st.info("The stored footprint overlay is stale for this canvas. Generate a new preview to update it.")
     st.caption("The crop frame is the output sky footprint; available footprint overlays do not guarantee full pixel coverage.")
+
+
+def _current_footprint_path(card: SceneCard, card_path: Path | None) -> Path | None:
+    if card_path is None:
+        return None
+    render = matching_render(card)
+    if render is None or render.footprint_asset_id is None:
+        return None
+    asset = (card.assets or {}).get(render.footprint_asset_id)
+    if asset is None or asset.kind != "footprint" or asset.path is None:
+        return None
+    path = asset_path(card_path, asset)
+    return path if path.is_file() else None
 
 
 def _render_render(settings: ApplicationSettings) -> None:
@@ -730,7 +993,15 @@ def _render_render(settings: ApplicationSettings) -> None:
     with st.expander("Mapping and tone controls"):
         _render_color(card)
         card = st.session_state["active_card"]
-        _render_tone(card)
+        _render_tone(card, st.session_state.get("active_path"), branch)
+        card = st.session_state["active_card"]
+    with st.expander("Background pedestal"):
+        _render_background(card, st.session_state.get("active_path"), branch)
+        card = st.session_state["active_card"]
+    with st.expander("Coverage and normalization reference"):
+        _render_coverage(card, st.session_state.get("active_path"), branch)
+        card = st.session_state["active_card"]
+        _render_normalization_reference(card, st.session_state.get("active_path"), branch)
         card = st.session_state["active_card"]
     problems = render_issues(card, branch)
     if problems:
@@ -754,10 +1025,17 @@ def _render_render(settings: ApplicationSettings) -> None:
         elif snapshot.phase is OperationPhase.SUCCEEDED and snapshot.result is not None:
             if not st.session_state.get("render_job_applied"):
                 try:
-                    merged = merge_render_completion(card, snapshot.result.card)
+                    if (
+                        snapshot.result.card.content_revision > card.content_revision
+                        and document(card) == st.session_state.get("saved_document")
+                    ):
+                        merged = snapshot.result.card
+                    else:
+                        merged = merge_render_completion(card, snapshot.result.card)
                     st.session_state["active_card"] = merged
                     st.session_state["saved_document"] = document(snapshot.result.card)
                     st.session_state["render_job_applied"] = True
+                    st.rerun()  # Redraw the preview from the newly attached live card.
                     card = merged
                     st.success(snapshot.message)
                 except ValueError as exc:
@@ -777,7 +1055,11 @@ def _render_render(settings: ApplicationSettings) -> None:
                 st.rerun()
     running = snapshot is not None and snapshot.phase is OperationPhase.RUNNING
     if st.button("Generate preview", disabled=bool(problems) or running):
-        if st.session_state.get("active_path") is None and not _save_active(settings):
+        if _render_launch_needs_save(
+            card,
+            st.session_state.get("active_path"),
+            st.session_state.get("saved_document"),
+        ) and not _save_active(settings):
             return
         st.session_state["render_job"] = start_render_job(st.session_state["active_path"])
         st.session_state["render_job_applied"] = False
@@ -817,7 +1099,6 @@ def _render_aligned_planes(path: Path) -> None:
     st.caption(f"Explicit aligned-plane input: {path}")
     try:
         records = load_multiplane_records(path)
-        planes = {record.plane_id: record.data for record in records}
         metadata = {record.plane_id: record.metadata for record in records}
         mappings = default_plane_mappings(metadata)
         mapping = MappingConfig(planes=mappings)
@@ -829,15 +1110,399 @@ def _render_aligned_planes(path: Path) -> None:
             bias=ToneGainBias(red=0.0, green=0.0, blue=0.0),
             saturation=1.0,
         )
-        composed = compose_channels(CompositionInputs(planes, metadata), mapping)
-        image = apply_tone(composed, tone, bit_depth=16).astype(np.uint16)
+        image = render_aligned_planes(records, mapping, tone, bit_depth=16).rgb.astype(np.uint16)
         st.image(np.clip(image / 257.0, 0, 255).astype(np.uint8), caption="Aligned-plane preview")
         st.info("This artifact has no invented archive provenance. Save becomes available after creating a scene card.")
     except (OSError, ValueError) as exc:
         st.error(f"Aligned-plane preview failed: {exc}")
 
 
-def _render_tone(card: SceneCard) -> None:
+def _render_coverage(card: SceneCard, card_path: Path | None, branch: str) -> None:
+    current = document(card.coverage) if card.coverage is not None else {
+        "policy": "available_contributors", "tone_reference": "common_required_bands",
+        "crop": "none", "padding_pixels": 0,
+    }
+    policy = st.selectbox(
+        "Output footprint",
+        ["available_contributors", "common_required_bands"],
+        index=0 if current.get("policy") == "available_contributors" else 1,
+        key="coverage-policy",
+    )
+    tone_reference = st.selectbox(
+        "Brightness reference pixels",
+        ["common_required_bands", "output_support"],
+        index=(
+            0 if current.get("tone_reference", "common_required_bands")
+            == "common_required_bands" else 1
+        ),
+        key="coverage-tone-reference",
+    )
+    crop = st.selectbox(
+        "Support crop", ["none", "bounding_box"],
+        index=0 if current.get("crop") == "none" else 1,
+        key="coverage-crop",
+    )
+    padding = int(st.number_input(
+        "Crop padding (pixels)", min_value=0,
+        value=int(current.get("padding_pixels", 0)), key="coverage-padding",
+    ))
+    proposal = CoverageConfig(
+        policy=policy, tone_reference=tone_reference, crop=crop, padding_pixels=padding,
+    )
+    aligned_path = _latest_aligned_path(card, card_path, branch)
+    preview_col, apply_col = st.columns(2)
+    if preview_col.button("Preview coverage policy", key="coverage-preview"):
+        if aligned_path is None:
+            st.error("Generate a baseline preview with aligned planes before previewing coverage.")
+        else:
+            try:
+                rendered = render_aligned_planes(
+                    load_multiplane_records(aligned_path),
+                    MappingConfig.model_validate(document(card.mapping)),
+                    ToneConfig.model_validate(document(card.tone)),
+                    bit_depth=16,
+                    background=BackgroundConfig.model_validate(
+                        document(card.background) if card.background is not None else {}
+                    ),
+                    coverage=proposal,
+                )
+                st.session_state["coverage_proposal"] = {
+                    "branch": branch, "aligned_path": str(aligned_path),
+                    "config": proposal, "result": rendered,
+                }
+            except (OSError, ValueError, BackgroundSamplingError) as exc:
+                st.session_state.pop("coverage_proposal", None)
+                st.error(f"Coverage preview is unsupported: {exc}")
+    context = st.session_state.get("coverage_proposal")
+    valid = (
+        isinstance(context, dict) and context.get("branch") == branch
+        and aligned_path is not None and context.get("aligned_path") == str(aligned_path)
+        and context.get("config") == proposal
+    )
+    if valid:
+        result = context["result"]
+        st.image(
+            np.clip(result.rgb / 257.0, 0, 255).astype(np.uint8),
+            caption="Coverage-policy candidate",
+        )
+        st.json(result.coverage.diagnostics)
+        if apply_col.button("Apply coverage policy", key="coverage-apply"):
+            st.session_state["active_card"] = edit_scene(
+                card, {"coverage": proposal.model_dump(mode="json")}
+            )
+            st.success("Coverage policy applied. Prior renders are now stale until regenerated.")
+    else:
+        apply_col.button("Apply coverage policy", key="coverage-apply", disabled=True)
+
+
+def _render_normalization_reference(
+    card: SceneCard, card_path: Path | None, branch: str,
+) -> None:
+    st.caption(
+        "A region reference resolves locked per-plane bounds from the persisted background region; "
+        "crop and viewport changes do not recompute them."
+    )
+    left, right = st.columns(2)
+    black = float(left.number_input(
+        "Reference black percentile", min_value=0.0, max_value=99.999,
+        value=0.5, key="normalization-reference-black",
+    ))
+    white = float(right.number_input(
+        "Reference white percentile", min_value=0.001, max_value=100.0,
+        value=99.5, key="normalization-reference-white",
+    ))
+    aligned_path = _latest_aligned_path(card, card_path, branch)
+    preview_col, apply_col = st.columns(2)
+    if preview_col.button("Preview normalization reference", key="normalization-reference-preview"):
+        if aligned_path is None:
+            st.error("Generate a baseline preview with aligned planes before resolving a reference.")
+        else:
+            try:
+                planes = load_multiplane_records(aligned_path)
+                background = BackgroundConfig.model_validate(
+                    document(card.background) if card.background is not None else {}
+                )
+                corrected = apply_background(planes, background).planes
+                coverage = CoverageConfig.model_validate(
+                    document(card.coverage) if card.coverage is not None else {}
+                )
+                proposal = estimate_normalization_references(
+                    corrected, background, coverage,
+                    black_percentile=black, white_percentile=white,
+                )
+                st.session_state["normalization_reference_proposal"] = {
+                    "branch": branch, "aligned_path": str(aligned_path),
+                    "black": black, "white": white, "planes": corrected,
+                    "proposal": proposal,
+                }
+            except (OSError, ValueError, BackgroundSamplingError) as exc:
+                st.session_state.pop("normalization_reference_proposal", None)
+                st.error(f"Normalization reference is unsupported: {exc}")
+    context = st.session_state.get("normalization_reference_proposal")
+    valid = (
+        isinstance(context, dict) and context.get("branch") == branch
+        and aligned_path is not None and context.get("aligned_path") == str(aligned_path)
+        and context.get("black") == black and context.get("white") == white
+    )
+    if valid:
+        proposal = context["proposal"]
+        st.dataframe(pd.DataFrame([
+            {"plane": plane_id, **reference.model_dump(mode="json")}
+            for plane_id, reference in proposal.references.items()
+        ]), use_container_width=True)
+        if apply_col.button("Apply normalization reference", key="normalization-reference-apply"):
+            mapping = _mapping_with_reference_bounds(
+                document(card.mapping), context["planes"], proposal.references,
+            )
+            st.session_state["active_card"] = edit_scene(card, {"mapping": mapping})
+            st.success("Locked normalization reference applied. Prior renders are now stale.")
+    else:
+        apply_col.button(
+            "Apply normalization reference", key="normalization-reference-apply", disabled=True,
+        )
+
+
+def _mapping_with_reference_bounds(
+    mapping: dict[str, Any], planes: list[Any], references: dict[str, Any],
+) -> dict[str, Any]:
+    result = {**mapping, "planes": []}
+    metadata = {plane.plane_id: plane.metadata for plane in planes}
+    for entry in mapping.get("planes", []):
+        if entry.get("plane"):
+            targets = [entry["plane"]]
+        else:
+            requested = str(entry.get("filter") or "").upper()
+            targets = [
+                plane_id for plane_id, values in metadata.items()
+                if str(values.get("filter") or "").upper() == requested
+            ]
+        if not targets:
+            raise ValueError(f"normalization reference cannot resolve mapping selector {entry}")
+        for plane_id in targets:
+            reference = references.get(plane_id)
+            if reference is None:
+                raise ValueError(f"normalization reference is missing plane '{plane_id}'")
+            updated = {key: value for key, value in entry.items() if key != "filter"}
+            updated["plane"] = plane_id
+            previous = dict(entry.get("normalization") or {})
+            updated["normalization"] = {
+                **previous,
+                "mode": "fixed_bounds",
+                "black_value": reference.black_value,
+                "white_value": reference.white_value,
+                "reference": reference.model_dump(mode="json"),
+            }
+            result["planes"].append(updated)
+    return result
+
+
+def _render_background(card: SceneCard, card_path: Path | None, branch: str) -> None:
+    current = document(card.background) if card.background is not None else {}
+    current_regions = current.get("inclusion_regions", [])
+    current_exclusions = current.get("exclusion_regions", [])
+    canvas = card.canvas
+    center = canvas.center if canvas is not None else None
+    default_ra = float(current_regions[0]["center_ra_deg"]) if current_regions else float(center.ra_deg or 0)
+    default_dec = float(current_regions[0]["center_dec_deg"]) if current_regions else float(center.dec_deg or 0)
+    default_width = (
+        float(current_regions[0]["width_arcsec"]) if current_regions
+        else max(1.0, float((canvas.width or 1) * (canvas.pixel_scale_arcsec or 1)) * 0.25)
+    )
+    default_height = (
+        float(current_regions[0]["height_arcsec"]) if current_regions
+        else max(1.0, float((canvas.height or 1) * (canvas.pixel_scale_arcsec or 1)) * 0.25)
+    )
+    st.caption(
+        "Green marks the sky proposal, bright green marks common valid samples, and red marks exclusions."
+    )
+    left, right = st.columns(2)
+    ra = left.number_input("Sky center RA (deg)", min_value=0.0, max_value=359.999999,
+                           value=default_ra, key="background-ra")
+    dec = right.number_input("Sky center Dec (deg)", min_value=-90.0, max_value=90.0,
+                             value=default_dec, key="background-dec")
+    width = left.number_input("Sky width (arcsec)", min_value=0.001,
+                              value=default_width, key="background-width")
+    height = right.number_input("Sky height (arcsec)", min_value=0.001,
+                                value=default_height, key="background-height")
+    use_exclusion = st.checkbox(
+        "Exclude a protected source rectangle", value=bool(current_exclusions),
+        key="background-use-exclusion",
+    )
+    exclusions: list[SkyRectangleConfig] = []
+    if use_exclusion:
+        existing = current_exclusions[0] if current_exclusions else {}
+        ex_left, ex_right = st.columns(2)
+        ex_ra = ex_left.number_input(
+            "Exclusion center RA (deg)", min_value=0.0, max_value=359.999999,
+            value=float(existing.get("center_ra_deg", ra)), key="background-exclusion-ra",
+        )
+        ex_dec = ex_right.number_input(
+            "Exclusion center Dec (deg)", min_value=-90.0, max_value=90.0,
+            value=float(existing.get("center_dec_deg", dec)), key="background-exclusion-dec",
+        )
+        ex_width = ex_left.number_input(
+            "Exclusion width (arcsec)", min_value=0.001,
+            value=float(existing.get("width_arcsec", max(1.0, width * 0.25))),
+            key="background-exclusion-width",
+        )
+        ex_height = ex_right.number_input(
+            "Exclusion height (arcsec)", min_value=0.001,
+            value=float(existing.get("height_arcsec", max(1.0, height * 0.25))),
+            key="background-exclusion-height",
+        )
+        exclusions.append(SkyRectangleConfig(
+            region_id="protected-source", center_ra_deg=ex_ra, center_dec_deg=ex_dec,
+            width_arcsec=ex_width, height_arcsec=ex_height,
+        ))
+    estimator_data = current.get("estimator", {})
+    clip_sigma = st.number_input(
+        "Clip sigma", min_value=0.001,
+        value=float(estimator_data.get("clip_sigma", 3.0)), key="background-clip-sigma",
+    )
+    minimum_samples = int(st.number_input(
+        "Minimum common samples", min_value=1,
+        value=int(estimator_data.get("minimum_samples", 256)), step=1,
+        key="background-minimum-samples",
+    ))
+    minimum_fraction = st.number_input(
+        "Minimum common-valid fraction", min_value=0.001, max_value=1.0,
+        value=float(estimator_data.get("minimum_valid_fraction", 0.5)),
+        key="background-minimum-fraction",
+    )
+    policy = st.selectbox(
+        "Black reference policy", ["corrected_zero", "legacy_percentile"],
+        index=(
+            0 if current.get("mode") != "pedestal"
+            or current.get("black_reference_policy") == "corrected_zero" else 1
+        ),
+        key="background-black-policy",
+    )
+    proposal_config = BackgroundConfig(
+        mode="pedestal",
+        black_reference_policy=policy,
+        inclusion_regions=[SkyRectangleConfig(
+            region_id="sky", center_ra_deg=ra, center_dec_deg=dec,
+            width_arcsec=width, height_arcsec=height,
+        )],
+        exclusion_regions=exclusions,
+        estimator=BackgroundEstimatorConfig(
+            clip_sigma=clip_sigma,
+            max_iterations=int(estimator_data.get("max_iterations", 5)),
+            minimum_samples=minimum_samples,
+            minimum_valid_fraction=minimum_fraction,
+        ),
+    )
+    aligned_path = _latest_aligned_path(card, card_path, branch)
+    preview_column, apply_column, disable_column = st.columns(3)
+    if preview_column.button("Preview pedestal proposal", key="background-preview"):
+        if aligned_path is None:
+            st.error("Generate a baseline preview with aligned planes before estimating a pedestal.")
+        else:
+            try:
+                planes = load_multiplane_records(aligned_path)
+                proposal = estimate_background(planes, proposal_config)
+                st.session_state["background_proposal"] = {
+                    "branch": branch,
+                    "aligned_path": str(aligned_path),
+                    "config": proposal_config,
+                    "proposal": proposal,
+                }
+            except (OSError, ValueError, BackgroundSamplingError) as exc:
+                st.session_state.pop("background_proposal", None)
+                st.error(f"Background proposal is unsupported: {exc}")
+
+    context = st.session_state.get("background_proposal")
+    proposal = None
+    if (
+        isinstance(context, dict)
+        and context.get("branch") == branch
+        and aligned_path is not None
+        and context.get("aligned_path") == str(aligned_path)
+        and context.get("config") == proposal_config
+    ):
+        proposal = context.get("proposal")
+    if proposal is not None:
+        st.image(background_overlay_array(proposal), caption="Background region and common support")
+        st.dataframe(pd.DataFrame([
+            {"plane": plane_id, **record.model_dump(mode="json")}
+            for plane_id, record in proposal.resolved_planes.items()
+        ]), use_container_width=True)
+        try:
+            planes = load_multiplane_records(aligned_path)
+            applied_config = BackgroundConfig.model_validate({
+                **proposal_config.model_dump(mode="json"),
+                "resolved_branches": {
+                    branch: {
+                        key: value.model_dump(mode="json", exclude_none=True)
+                        for key, value in proposal.resolved_planes.items()
+                    }
+                },
+            })
+            candidate = render_aligned_planes(
+                planes,
+                MappingConfig.model_validate(document(card.mapping)),
+                ToneConfig.model_validate(document(card.tone)),
+                bit_depth=16,
+                background=applied_config,
+                coverage=CoverageConfig.model_validate(
+                    document(card.coverage) if card.coverage is not None else {}
+                ),
+            ).rgb
+            st.image(
+                np.clip(candidate / 257.0, 0, 255).astype(np.uint8),
+                caption="Candidate after pedestal correction",
+            )
+        except (OSError, ValueError) as exc:
+            st.warning(f"Candidate rendering is unavailable: {exc}")
+        if apply_column.button("Apply pedestal proposal", key="background-apply"):
+            applied = {
+                **proposal_config.model_dump(mode="json"),
+                "resolved_branches": {
+                    **current.get("resolved_branches", {}),
+                    branch: {
+                        key: value.model_dump(mode="json", exclude_none=True)
+                        for key, value in proposal.resolved_planes.items()
+                    },
+                },
+            }
+            st.session_state["active_card"] = edit_scene(card, {"background": applied})
+            st.success("Pedestal proposal applied. Prior renders are now stale until regenerated.")
+    else:
+        apply_column.button("Apply pedestal proposal", key="background-apply", disabled=True)
+
+    if disable_column.button("Disable background correction", key="background-disable"):
+        st.session_state.pop("background_proposal", None)
+        st.session_state["active_card"] = edit_scene(card, {"background": {
+            "mode": "off",
+            "black_reference_policy": "legacy_percentile",
+            "inclusion_regions": [],
+            "exclusion_regions": [],
+            "estimator": BackgroundEstimatorConfig().model_dump(mode="json"),
+            "resolved_branches": {},
+        }})
+        st.success("Background correction disabled. Prior applied background settings were cleared.")
+
+
+def _latest_aligned_path(
+    card: SceneCard, card_path: Path | None, branch: str,
+) -> Path | None:
+    if card_path is None:
+        return None
+    assets = card.assets or {}
+    for render in reversed(card.renders or []):
+        if render.branch != branch:
+            continue
+        for asset_id in render.aligned_plane_asset_ids or []:
+            asset = assets.get(asset_id)
+            if asset is None or asset.kind != "aligned_planes" or asset.path is None:
+                continue
+            path = asset_path(card_path, asset)
+            if path.is_file():
+                return path
+    return None
+
+
+def _render_tone(card: SceneCard, card_path: Path | None, branch: str) -> None:
     if card.tone is None:
         st.info("Apply the recommendation in refinement before editing tone.")
         return
@@ -855,11 +1520,203 @@ def _render_tone(card: SceneCard) -> None:
     tone["saturation"] = st.number_input(
         "Saturation", min_value=0.0, value=float(tone["saturation"]), key="render-saturation"
     )
+    application = st.selectbox(
+        "Tone application",
+        ["per_channel", "shared_intensity"],
+        index=0 if tone.get("application", "per_channel") == "per_channel" else 1,
+        key="render-tone-application",
+    )
+    tone["application"] = application
+    if application == "shared_intensity":
+        shared = dict(tone.get("shared_stretch") or {"kind": "asinh", "parameter": 4.0})
+        shared = _render_stretch_controls("Shared stretch", shared, "render-shared-stretch")
+        tone["shared_stretch"] = shared
+        resolution = tone.get("auto_stretch")
+        if resolution is not None and (
+            shared.get("kind") != "asinh"
+            or shared.get("parameter") != resolution.get("resolved_parameter")
+        ):
+            tone.pop("auto_stretch", None)
+        tone["gamut_policy"] = st.selectbox(
+            "Shared-tone gamut handling", ["clip", "rescale"],
+            index=0 if tone.get("gamut_policy", "clip") == "clip" else 1,
+            key="render-gamut-policy",
+        )
+    else:
+        tone.pop("shared_stretch", None)
+        tone.pop("auto_stretch", None)
+        for channel in ("red", "green", "blue"):
+            tone["stretch"][channel] = _render_stretch_controls(
+                f"{channel.title()} stretch", dict(tone["stretch"][channel]),
+                f"render-{channel}-stretch",
+            )
     if tone != document(card.tone):
         try:
             st.session_state["active_card"] = edit_scene(card, {"tone": tone})
+            card = st.session_state["active_card"]
         except ValueError as exc:
             st.error(str(exc))
+    if st.button("Use single main stretch", key="tone-single-main-stretch"):
+        mapping, shared_tone = _single_main_stretch(document(card.mapping), document(card.tone))
+        st.session_state["active_card"] = edit_scene(
+            card, {"mapping": mapping, "tone": shared_tone}
+        )
+        st.success("Per-plane stretches set to linear and shared-intensity tone selected.")
+        return
+    _render_auto_stretch(card, card_path, branch)
+
+
+def _render_stretch_controls(label: str, current: dict[str, Any], key: str) -> dict[str, Any]:
+    methods = ["linear", "asinh", "gamma", "ghs"]
+    kind = st.selectbox(
+        f"{label} method", methods,
+        index=methods.index(current.get("kind", "asinh")), key=f"{key}-kind",
+    )
+    if kind == "linear":
+        return {"kind": "linear"}
+    if kind in ("asinh", "gamma"):
+        return {
+            "kind": kind,
+            "parameter": float(st.number_input(
+                f"{label} parameter", min_value=0.000001,
+                value=float(current.get("parameter", 4.0 if kind == "asinh" else 1.0)),
+                key=f"{key}-parameter",
+            )),
+        }
+    stretch_factor = float(st.number_input(
+        f"{label} ln(D+1)", min_value=0.0, max_value=20.0,
+        value=float(current.get("stretch_factor", 1.0)), key=f"{key}-factor",
+    ))
+    local_intensity = float(st.number_input(
+        f"{label} local intensity", min_value=-5.0, max_value=15.0,
+        value=float(current.get("local_intensity", 0.0)), key=f"{key}-local",
+    ))
+    symmetry = float(st.number_input(
+        f"{label} symmetry point", min_value=0.0, max_value=1.0,
+        value=float(current.get("symmetry_point", 0.1)), key=f"{key}-symmetry",
+    ))
+    shadow = float(st.number_input(
+        f"{label} protect shadows", min_value=0.0, max_value=1.0,
+        value=float(current.get("shadow_protection", 0.0)), key=f"{key}-shadow",
+    ))
+    highlight = float(st.number_input(
+        f"{label} protect highlights", min_value=0.0, max_value=1.0,
+        value=float(current.get("highlight_protection", 1.0)), key=f"{key}-highlight",
+    ))
+    return {
+        "kind": "ghs", "stretch_factor": stretch_factor,
+        "local_intensity": local_intensity, "symmetry_point": symmetry,
+        "shadow_protection": shadow, "highlight_protection": highlight,
+    }
+
+
+def _single_main_stretch(
+    mapping: dict[str, Any], tone: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    updated_mapping = {**mapping}
+    defaults = dict(updated_mapping.get("defaults") or {})
+    normalization = dict(defaults.get("normalization") or {})
+    normalization.update({"stretch": "linear", "stretch_parameter": 1.0})
+    defaults["normalization"] = normalization
+    updated_mapping["defaults"] = defaults
+    updated_planes = []
+    for entry in updated_mapping.get("planes", []):
+        item = dict(entry)
+        if item.get("normalization") is not None:
+            item["normalization"] = {
+                **item["normalization"], "stretch": "linear", "stretch_parameter": 1.0,
+            }
+        updated_planes.append(item)
+    updated_mapping["planes"] = updated_planes
+    updated_tone = {
+        **tone,
+        "application": "shared_intensity",
+        "shared_stretch": tone.get("shared_stretch") or {"kind": "asinh", "parameter": 4.0},
+        "gamut_policy": tone.get("gamut_policy", "clip"),
+    }
+    updated_tone.pop("auto_stretch", None)
+    return updated_mapping, updated_tone
+
+
+def _render_auto_stretch(card: SceneCard, card_path: Path | None, branch: str) -> None:
+    aligned_path = _latest_aligned_path(card, card_path, branch)
+    action = "Recompute auto-stretch proposal" if card.tone.auto_stretch else "Preview auto-stretch proposal"
+    preview, apply_column = st.columns(2)
+    if preview.button(action, key="auto-stretch-preview"):
+        if aligned_path is None:
+            st.error("Generate a baseline preview with aligned planes before auto-stretch.")
+        else:
+            try:
+                planes = load_multiplane_records(aligned_path)
+                background = BackgroundConfig.model_validate(
+                    document(card.background) if card.background is not None else {}
+                )
+                if not background.inclusion_regions:
+                    raise ValueError("auto-stretch requires persisted background regions")
+                _, sample_mask, _ = background_masks(planes, background)
+                coverage = CoverageConfig.model_validate(
+                    document(card.coverage) if card.coverage is not None else {}
+                )
+                linear_tone_data = {
+                    **document(card.tone), "application": "shared_intensity",
+                    "shared_stretch": {"kind": "linear"}, "saturation": 1.0,
+                }
+                linear_tone_data.pop("auto_stretch", None)
+                linear_tone = ToneConfig.model_validate(linear_tone_data)
+                linear = render_aligned_planes(
+                    planes, MappingConfig.model_validate(document(card.mapping)), linear_tone,
+                    bit_depth=16, background=background, coverage=coverage,
+                )
+                x0, y0, x1, y1 = linear.coverage.crop_bounds_xyxy
+                cropped_mask = sample_mask[y0:y1, x0:x1]
+                reference = propose_auto_stretch(
+                    linear.rgb / 65535.0, cropped_mask,
+                    reference_id=background_selection_key(planes, background),
+                    branch=branch, grid_id=str(planes[0].grid_id),
+                    source_ids=list(dict.fromkeys(
+                        source for plane in planes for source in plane.source_ids
+                    )),
+                    minimum_samples=background.estimator.minimum_samples,
+                )
+                proposed_data = {
+                    **document(card.tone), "application": "shared_intensity",
+                    "shared_stretch": {
+                        "kind": "asinh", "parameter": reference.resolved_parameter,
+                    },
+                    "auto_stretch": reference.model_dump(mode="json"),
+                }
+                proposed = ToneConfig.model_validate(proposed_data)
+                candidate = render_aligned_planes(
+                    planes, MappingConfig.model_validate(document(card.mapping)), proposed,
+                    bit_depth=16, background=background, coverage=coverage,
+                )
+                st.session_state["auto_stretch_proposal"] = {
+                    "branch": branch, "aligned_path": str(aligned_path),
+                    "tone": proposed, "reference": reference, "image": candidate.rgb,
+                }
+            except (OSError, ValueError, BackgroundSamplingError) as exc:
+                st.session_state.pop("auto_stretch_proposal", None)
+                st.error(f"Auto-stretch proposal is unavailable: {exc}")
+    context = st.session_state.get("auto_stretch_proposal")
+    valid = (
+        isinstance(context, dict) and context.get("branch") == branch
+        and aligned_path is not None and context.get("aligned_path") == str(aligned_path)
+    )
+    if valid:
+        st.json(context["reference"].model_dump(mode="json"))
+        st.image(
+            np.clip(context["image"] / 257.0, 0, 255).astype(np.uint8),
+            caption="Auto-stretch candidate",
+        )
+        if apply_column.button("Apply auto-stretch proposal", key="auto-stretch-apply"):
+            st.session_state["active_card"] = edit_scene(
+                card, {"tone": context["tone"].model_dump(mode="json")}
+            )
+            st.success("Auto-stretch proposal applied. Prior renders are now stale.")
+    else:
+        apply_column.button(
+            "Apply auto-stretch proposal", key="auto-stretch-apply", disabled=True,
+        )
 
 
 def _render_output(settings: ApplicationSettings) -> None:
@@ -904,7 +1761,12 @@ def _render_output(settings: ApplicationSettings) -> None:
         else:
             try:
                 updated = export_current_render(
-                    card, card_path, destination, output_format=output_format, overwrite=overwrite
+                    card,
+                    card_path,
+                    destination,
+                    output_format=output_format,
+                    overwrite=overwrite,
+                    branch=st.session_state.get("render-branch", "original"),
                 )
                 st.session_state["active_card"] = updated
                 st.session_state["saved_document"] = document(updated)
@@ -924,6 +1786,13 @@ def _render_library(settings: ApplicationSettings) -> None:
     except ValueError as exc:
         st.error(str(exc))
         return
+    success = st.session_state.pop("project_delete_success", None)
+    if success:
+        st.success(success)
+    if _render_project_delete_confirmation(settings, library.saved_scenes):
+        return
+    if _render_example_overwrite_confirmation(settings):
+        return
     st.header("Examples")
     _render_library_entries(library.examples, settings, "example")
     st.header("Saved scenes")
@@ -935,6 +1804,90 @@ def _render_library(settings: ApplicationSettings) -> None:
         st.rerun()
 
 
+def _same_path(left: str | Path | None, right: str | Path | None) -> bool:
+    return left is not None and right is not None and Path(left).resolve() == Path(right).resolve()
+
+
+def _project_delete_blocked(path: Path) -> bool:
+    job: RenderJob | None = st.session_state.get("render_job")
+    return bool(
+        job is not None
+        and _same_path(st.session_state.get("active_path"), path)
+        and job.snapshot().phase is OperationPhase.RUNNING
+    )
+
+
+def _render_project_delete_confirmation(
+    settings: ApplicationSettings, entries: tuple[LibraryEntry, ...]
+) -> bool:
+    pending = st.session_state.get("pending_project_delete")
+    if pending is None:
+        return False
+    entry = next((item for item in entries if _same_path(item.path, pending)), None)
+    if entry is None or entry.card is None:
+        st.session_state.pop("pending_project_delete", None)
+        st.error("The selected project no longer exists or is not a valid saved scene.")
+        return True
+    asset_root = associated_asset_root(entry.path)
+    st.warning(f'Delete project "{entry.card.title}"?')
+    st.write(f"Scene card: {entry.path}")
+    st.write(
+        f"Associated asset folder: {asset_root}"
+        if asset_root.exists() else "Associated asset folder: none"
+    )
+    st.caption("Deletion moves these items into .galaxy-trash for manual recovery.")
+    blocked = _project_delete_blocked(entry.path)
+    if blocked:
+        st.error("This project cannot be deleted while its render is running.")
+    confirm, cancel = st.columns(2)
+    if confirm.button("Delete project", key="confirm-project-delete", disabled=blocked):
+        try:
+            deleted = delete_library_scene(entry, settings.scene_directory)
+            was_active = _same_path(st.session_state.get("active_path"), entry.path)
+            st.session_state.pop("pending_project_delete", None)
+            if was_active:
+                _close_active_scene()
+                st.session_state["screen"] = Screen.LIBRARY.value
+            st.session_state["operation_phase"] = OperationPhase.SUCCEEDED.value
+            st.session_state["operation_message"] = f'Deleted project "{entry.card.title}"'
+            st.session_state["project_delete_success"] = (
+                f'Deleted project "{entry.card.title}". Recovery files: '
+                f"{deleted.recovery_directory}"
+            )
+            st.rerun()
+        except (OSError, ValueError) as exc:
+            st.session_state["operation_phase"] = OperationPhase.FAILED.value
+            st.session_state["operation_message"] = str(exc)
+            st.error(f"Delete failed: {exc}")
+    if cancel.button("Cancel", key="cancel-project-delete"):
+        st.session_state.pop("pending_project_delete", None)
+        st.rerun()
+    return True
+
+
+def _render_example_overwrite_confirmation(settings: ApplicationSettings) -> bool:
+    source_text = st.session_state.get("pending_example_overwrite")
+    if source_text is None:
+        return False
+    source = Path(source_text)
+    destination = example_user_path(source, settings.scene_directory)
+    st.warning(f"Replace the user scene JSON at {destination}?")
+    st.write("The matching binary asset folder will be retained unchanged.")
+    confirm, cancel = st.columns(2)
+    if confirm.button("Overwrite user scene JSON", key="confirm-example-overwrite"):
+        try:
+            copied, path = materialize_example(source, settings.scene_directory, overwrite=True)
+            st.session_state.pop("pending_example_overwrite", None)
+            _request_scene_replacement(copied, path, saved=True)
+            st.rerun()
+        except (OSError, ValueError) as exc:
+            st.error(f"Example overwrite failed: {exc}")
+    if cancel.button("Cancel overwrite", key="cancel-example-overwrite"):
+        st.session_state.pop("pending_example_overwrite", None)
+        st.rerun()
+    return True
+
+
 def _render_library_entries(
     entries: tuple[LibraryEntry, ...], settings: ApplicationSettings, group: str
 ) -> None:
@@ -942,7 +1895,7 @@ def _render_library_entries(
         if entry.card is None:
             st.error(f"{entry.path.name}: invalid scene card - {entry.error}")
             continue
-        columns = st.columns([1, 3, 1, 1])
+        columns = st.columns([1, 3, 1, 1, 1])
         if entry.thumbnail_path:
             columns[0].image(str(entry.thumbnail_path), caption=entry.thumbnail_kind)
         else:
@@ -963,17 +1916,42 @@ def _render_library_entries(
                 "Missing dependencies: " + ", ".join(issue.asset_id for issue in entry.dependencies)
             )
         if columns[2].button("Open", key=f"library-open-{group}-{index}"):
-            _request_scene_replacement(
-                entry.card, entry.path, saved=True, origin=entry.origin
-            )
-            st.rerun()
+            try:
+                if entry.origin is LibraryOrigin.BUNDLED_EXAMPLE:
+                    card, path = open_example_user_copy(entry.path, settings.scene_directory)
+                    _request_scene_replacement(card, path, saved=True)
+                else:
+                    _request_scene_replacement(entry.card, entry.path, saved=True)
+                st.rerun()
+            except (OSError, ValueError) as exc:
+                st.error(f"Open failed: {exc}")
         if columns[3].button("Duplicate", key=f"library-copy-{group}-{index}"):
             try:
+                if (
+                    entry.origin is LibraryOrigin.BUNDLED_EXAMPLE
+                    and example_user_path(entry.path, settings.scene_directory).exists()
+                ):
+                    st.session_state["pending_example_overwrite"] = str(entry.path)
+                    st.rerun()
                 copied, _ = duplicate_library_scene(entry, settings.scene_directory)
-                _request_scene_replacement(copied, None, saved=False)
+                path = (
+                    example_user_path(entry.path, settings.scene_directory)
+                    if entry.origin is LibraryOrigin.BUNDLED_EXAMPLE else None
+                )
+                _request_scene_replacement(
+                    copied, path, saved=True
+                )
                 st.rerun()
             except (OSError, ValueError) as exc:
                 st.error(f"Duplicate failed: {exc}")
+        if entry.origin is LibraryOrigin.USER_SCENE:
+            blocked = _project_delete_blocked(entry.path)
+            if columns[4].button(
+                "Delete", key=f"library-delete-{group}-{index}", disabled=blocked,
+                help="A running render must finish or be cancelled before deletion." if blocked else None,
+            ):
+                st.session_state["pending_project_delete"] = str(entry.path)
+                st.rerun()
 
 
 if __name__ == "__main__":  # Streamlit executes this file as the application script.

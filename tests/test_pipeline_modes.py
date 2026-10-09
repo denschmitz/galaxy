@@ -8,9 +8,15 @@ import astropy.units as u
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from galaxy.processing_config import ExecutionConfig, GalaxyConfig, PSFConfig
+from galaxy.checkpoints import build_producer_inputs, write_checkpoint_manifest
+from galaxy.background import estimate_background
+from galaxy.processing_config import (
+    BackgroundConfig, BackgroundEstimatorConfig, ExecutionConfig, GalaxyConfig,
+    PSFConfig, SkyRectangleConfig,
+)
 from galaxy.fitsio import FITSPlane
-from galaxy.pipeline import _load_or_build_reprojected, run_pipeline
+from galaxy.pipeline import _load_or_build_reprojected, _validate_selected_plane_coverage, run_pipeline
+from galaxy.planes import export_multiplane_fits
 from galaxy.reprojection import REPROJECT_METHOD_INTERPOLATION, ReprojectedPlane, estimate_workspace_peak_bytes
 from galaxy.selection import CandidateRecord, load_candidate_manifest
 
@@ -72,15 +78,48 @@ def _candidate(selected: bool = True) -> CandidateRecord:
     )
 
 
-def _write_exported_planes(path: Path) -> None:
-    header = fits.Header()
-    header["PLANEID"] = "plane_a"
-    header["FILTER"] = "F200W"
-    header["MISSION"] = "JWST"
-    header["INSTRUME"] = "NIRCAM"
-    header["EXPTIME"] = 123.0
+def test_selected_plane_coverage_rejects_zero_footprint() -> None:
+    planes = [
+        ReprojectedPlane(
+            "outside-canvas",
+            np.ones((4, 4), dtype=np.float32),
+            np.zeros((4, 4), dtype=np.float32),
+            {"filter": "F090W"},
+            wcs=_simple_wcs(),
+        )
+    ]
+
+    with pytest.raises(RuntimeError, match="outside-canvas"):
+        _validate_selected_plane_coverage(planes)
+
+
+def test_selected_plane_coverage_accepts_nonzero_footprint() -> None:
+    planes = [
+        ReprojectedPlane(
+            "on-canvas",
+            np.ones((4, 4), dtype=np.float32),
+            np.ones((4, 4), dtype=np.float32),
+            {"filter": "F090W"},
+            wcs=_simple_wcs(),
+        )
+    ]
+
+    _validate_selected_plane_coverage(planes)
+
+
+def _write_exported_planes(path: Path) -> ReprojectedPlane:
     data = np.arange(64, dtype=np.float32).reshape(8, 8)
-    fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(data=data, header=header, name="PLANEA")]).writeto(path)
+    plane = ReprojectedPlane(
+        "plane_a",
+        data,
+        np.ones_like(data, dtype=np.float32),
+        {"filter": "F200W", "mission": "JWST", "instrument": "NIRCAM", "exposure_time": 123.0},
+        wcs=_simple_wcs(),
+        source_ids=("source-a",),
+        parent_ids=("native-a",),
+    )
+    export_multiplane_fits([plane], path)
+    return plane
 
 
 def _simple_wcs() -> WCS:
@@ -132,6 +171,7 @@ def test_run_pipeline_download_only_writes_manifest_candidates_and_provenance(mo
     candidates = load_candidate_manifest(tmp_path / "candidates.json")
 
     assert artifacts.config_path == Path("scene.json")
+    assert Path(manifest[0]["local_path"]).parent == (tmp_path / "cache").resolve()
     assert artifacts.footprint_overlay_path is None
     assert not (tmp_path / "run_config.yaml").exists()
     assert manifest[0]["candidate_id"] == "cand-1"
@@ -139,21 +179,133 @@ def test_run_pipeline_download_only_writes_manifest_candidates_and_provenance(mo
     assert provenance["selection"]["source"] == "raw_config_discovery"
     assert provenance["selection"]["policy"] == "latest_per_filter"
     assert provenance["selection"]["final_selected_candidate_ids"] == ["cand-1"]
+    assert provenance["tone_algorithms"] == {
+        "application": "per_channel",
+        "methods": ["asinh", "asinh", "asinh"],
+        "gamut_policy": "clip",
+        "algorithm_versions": {"tone_application": "tone-v2"},
+    }
 
 
 def test_run_pipeline_compose_only_uses_exported_planes(tmp_path) -> None:
     config = _base_config()
-    _write_exported_planes(tmp_path / "exported_planes.fits")
+    fits_path = tmp_path / "exported_planes.fits"
+    plane = _write_exported_planes(fits_path)
+    source = tmp_path / "source.fits"
+    source.write_bytes(b"source-content")
+    producer_inputs = build_producer_inputs(
+        config,
+        [source],
+        "original",
+        resolved_center_deg=(10.0, 20.0),
+        source_ids_by_path={source.resolve(): "source-a"},
+    )
+    checkpoint_path = write_checkpoint_manifest(
+        [plane], fits_path, producer_inputs, "original",
+        resolved_settings={"mode": "configured_canvas", "width": 32, "height": 32},
+    )
+    checkpoint_before = checkpoint_path.read_bytes()
+    fits_before = fits_path.read_bytes()
 
-    artifacts = run_pipeline(config, tmp_path, mode="compose-only", config_path="scene.json")
+    artifacts = run_pipeline(
+        config,
+        tmp_path,
+        mode="compose-only",
+        config_path="scene.json",
+        local_product_paths={"source-a": source},
+    )
     provenance = json.loads(artifacts.provenance_path.read_text(encoding="utf-8"))
 
     assert artifacts.png_path is not None and artifacts.png_path.exists()
     assert artifacts.tiff_path is not None and artifacts.tiff_path.exists()
+    assert artifacts.checkpoint_manifest_path is not None
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert fits_path.read_bytes() == fits_before
     assert artifacts.footprint_overlay_path is not None and artifacts.footprint_overlay_path.exists()
     assert provenance["reprojection"]["mode"] == "compose_only_export"
     assert artifacts.config_path.name == "scene.json"
     assert not (tmp_path / "run_config.yaml").exists()
+
+
+def test_run_pipeline_compose_only_rejects_legacy_stack_without_manifest(tmp_path) -> None:
+    config = _base_config()
+    _write_exported_planes(tmp_path / "exported_planes.fits")
+    source = tmp_path / "source.fits"
+    source.write_bytes(b"source-content")
+
+    with pytest.raises(ValueError, match="missing checkpoint manifest"):
+        run_pipeline(
+            config,
+            tmp_path,
+            mode="compose-only",
+            config_path="scene.json",
+            local_product_paths={"source-a": source},
+        )
+
+
+def test_compose_only_reuses_pre_background_checkpoint_and_records_stage(tmp_path) -> None:
+    base = _base_config()
+    fits_path = tmp_path / "exported_planes.fits"
+    plane = _write_exported_planes(fits_path)
+    source = tmp_path / "source.fits"
+    source.write_bytes(b"source-content")
+    producer_inputs = build_producer_inputs(
+        base, [source], "original", resolved_center_deg=(10.0, 20.0),
+        source_ids_by_path={source.resolve(): "source-a"},
+    )
+    checkpoint_path = write_checkpoint_manifest(
+        [plane], fits_path, producer_inputs, "original",
+        resolved_settings={"mode": "configured_canvas", "width": 32, "height": 32},
+    )
+    center_ra, center_dec = plane.wcs.pixel_to_world_values(3.5, 3.5)
+    background = BackgroundConfig(
+        mode="pedestal",
+        black_reference_policy="corrected_zero",
+        inclusion_regions=[SkyRectangleConfig(
+            region_id="sky", center_ra_deg=float(center_ra), center_dec_deg=float(center_dec),
+            width_arcsec=7.0, height_arcsec=7.0,
+        )],
+        estimator=BackgroundEstimatorConfig(
+            minimum_samples=16, minimum_valid_fraction=0.5,
+        ),
+    )
+    proposal = estimate_background([plane], background)
+    enabled = GalaxyConfig.model_validate({
+        **base.model_dump(mode="json"),
+        "background": {
+            **background.model_dump(mode="json"),
+            "resolved_branches": {
+                "original": {
+                    key: value.model_dump(mode="json", exclude_none=True)
+                    for key, value in proposal.resolved_planes.items()
+                }
+            },
+        },
+    })
+    fits_before = fits_path.read_bytes()
+    checkpoint_before = checkpoint_path.read_bytes()
+
+    artifacts = run_pipeline(
+        enabled,
+        tmp_path,
+        mode="compose-only",
+        config_path="scene.json",
+        local_product_paths={"source-a": source},
+    )
+    provenance = json.loads(artifacts.provenance_path.read_text(encoding="utf-8"))
+
+    assert fits_path.read_bytes() == fits_before
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert artifacts.background_diagnostics_path is not None
+    assert artifacts.background_diagnostics_path.is_file()
+    assert artifacts.background_overlay_path is not None
+    assert artifacts.background_overlay_path.is_file()
+    stage = next(item for item in provenance["stage_records"]
+                 if item["stage_id"] == "background_pedestal")
+    assert stage["branch"] == "original"
+    assert stage["resolved_settings"]["plane_a"]["pedestal"] == pytest.approx(
+        proposal.resolved_planes["plane_a"].pedestal
+    )
 
 
 def test_run_pipeline_raises_when_no_selected_candidates(monkeypatch, tmp_path) -> None:
@@ -180,7 +332,7 @@ def test_load_or_build_reprojected_continues_past_bad_files_when_fail_fast_disab
     monkeypatch.setattr(
         "galaxy.pipeline.reproject_all",
         lambda planes, output_wcs, shape_out, flux_conserving, progress=None: [
-            ReprojectedPlane("good", np.ones((4, 4), dtype=np.float32), np.ones((4, 4), dtype=np.float32), {"filter": "F200W"})
+            ReprojectedPlane("good", np.ones((4, 4), dtype=np.float32), np.ones((4, 4), dtype=np.float32), {"filter": "F200W"}, wcs=_simple_wcs())
         ],
     )
     monkeypatch.setattr("galaxy.pipeline.save_reprojected_plane", lambda *args, **kwargs: None)
@@ -245,7 +397,7 @@ def test_load_or_build_reprojected_warns_when_estimate_exceeds_80_percent_ram(mo
     monkeypatch.setattr(
         "galaxy.pipeline.reproject_all",
         lambda planes, output_wcs, shape_out, flux_conserving, progress=None: [
-            ReprojectedPlane("good", np.ones((4, 4), dtype=np.float32), np.ones((4, 4), dtype=np.float32), {"filter": "F200W"})
+            ReprojectedPlane("good", np.ones((4, 4), dtype=np.float32), np.ones((4, 4), dtype=np.float32), {"filter": "F200W"}, wcs=_simple_wcs())
         ],
     )
     monkeypatch.setattr("galaxy.pipeline.save_reprojected_plane", lambda *args, **kwargs: None)
@@ -288,7 +440,7 @@ def test_load_or_build_reprojected_logs_warning_without_progress_callback(monkey
     monkeypatch.setattr(
         "galaxy.pipeline.reproject_all",
         lambda planes, output_wcs, shape_out, flux_conserving, progress=None: [
-            ReprojectedPlane("good", np.ones((4, 4), dtype=np.float32), np.ones((4, 4), dtype=np.float32), {"filter": "F200W"})
+            ReprojectedPlane("good", np.ones((4, 4), dtype=np.float32), np.ones((4, 4), dtype=np.float32), {"filter": "F200W"}, wcs=_simple_wcs())
         ],
     )
     monkeypatch.setattr("galaxy.pipeline.save_reprojected_plane", lambda *args, **kwargs: None)
@@ -326,7 +478,7 @@ def test_load_or_build_reprojected_records_full_configured_canvas_provenance(mon
     monkeypatch.setattr(
         "galaxy.pipeline.reproject_all",
         lambda planes, output_wcs, shape_out, flux_conserving, progress=None: [
-            ReprojectedPlane("good", np.ones((4, 4), dtype=np.float32), np.ones((4, 4), dtype=np.float32), {"filter": "F200W"})
+            ReprojectedPlane("good", np.ones((4, 4), dtype=np.float32), np.ones((4, 4), dtype=np.float32), {"filter": "F200W"}, wcs=_simple_wcs())
         ],
     )
     monkeypatch.setattr("galaxy.pipeline.save_reprojected_plane", lambda *args, **kwargs: None)
@@ -397,6 +549,8 @@ def test_run_pipeline_with_psf_exports_original_and_deconvolved_branches(monkeyp
                 "instrument": "NIRCAM",
                 "observation_id": "OBS1",
                 "exposure_time": 123.0,
+                "native_unit": "MJy/sr",
+                "mask_sources": ["WHT"],
             },
         )
 
@@ -410,6 +564,11 @@ def test_run_pipeline_with_psf_exports_original_and_deconvolved_branches(monkeyp
     assert artifacts.deconvolved_tiff_path is not None and artifacts.deconvolved_tiff_path.exists()
     assert artifacts.deconvolved_planes_path is not None and artifacts.deconvolved_planes_path.exists()
     assert artifacts.footprint_overlay_path is not None and artifacts.footprint_overlay_path.exists()
+    provenance = json.loads(artifacts.provenance_path.read_text(encoding="utf-8"))
+    assert provenance["planes"][0]["native_unit"] == "MJy/sr"
+    assert provenance["planes"][0]["mask_sources"] == ["WHT"]
+    assert provenance["planes"][0]["normalization_mode"] == "native"
+    assert provenance["planes"][0]["rgb_contribution_percent"]["red"] == pytest.approx(100.0)
     assert any(item.name.endswith("__deconvolved.fits") for item in (tmp_path / "cache").iterdir())
     assert artifacts.config_path.name == "scene.json"
     assert not (tmp_path / "run_config.yaml").exists()

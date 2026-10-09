@@ -6,7 +6,7 @@ A **scene card** is Galaxy's project file: one UTF-8 JSON document containing ev
 
 The card stores structured data and references; binary images, FITS files, and other large artifacts live in an optional associated asset directory or the shared source cache. There is no separate YAML project file and no required per-scene settings sidecar.
 
-This specification defines the contract referenced by REQ-PROJ-001 and REQ-CARD-001 in [Design requirements](design_requirements.md). The companion [JSON Schema](scene_card.schema.json) defines structural validation; Python action and reference checks enforce cross-field rules. The [artifact storage specification](artifact_storage_spec.md) defines normative filesystem names and placement. [User flows](user_flows.md) describes how screens populate it.
+This specification defines the contract referenced by REQ-PROJ-001 and REQ-CARD-001 in [Design requirements](design_requirements.md). The companion [JSON Schema](scene_card.schema.json) defines structural validation; Python action and reference checks enforce cross-field rules. The [artifact storage specification](artifact_storage_spec.md) defines normative filesystem names and placement. [User flows](user_flows.md) describes how screens populate it, and the [selected-footprint viewport specification](viewport_framing_spec.md) defines how a fitted canvas is derived before its ordinary explicit values are stored.
 
 ## 2. File and asset layout
 
@@ -55,8 +55,10 @@ Only the first seven metadata fields are required in a newly saved card. All oth
 | selection | object | Selected observations, source products, and exact product identities. |
 | canvas | object | Output sky frame and raster geometry. |
 | planes | object | Plane/filter activation. |
+| coverage | object | Presentation support policy and optional bounding crop. |
 | mapping | object | Automatic mapping strategy and explicit RGB contributions. |
-| tone | object | Channel stretch, clipping, gain, bias, and saturation. |
+| tone | object | Per-channel or shared-intensity stretch, clipping, gain, bias, saturation, and optional locked proposal. |
+| background | object | Optional off/pedestal correction, sky regions, estimator, black policy, and branch-specific resolved values. |
 | psf | object | Optional PSF processing configuration. |
 | execution | object | Runtime policy; does not define scene appearance. |
 | assets | object | Map from locally unique asset IDs to asset records. |
@@ -142,9 +144,12 @@ pixel_scale_arcsec: finite number >0.
 width and height: positive integers.
 rotation_deg: finite number in [0,360); normalize 360 to zero.
 flux_conserving: boolean.
+frame_origin: optional `search_region`, `selected_footprints`, or `user` marker.
+Only `search_region` is provisional and eligible for the warning-free automatic
+first-render fit. A missing marker is retained as an existing/user-owned frame.
 view_state: optional object with zoom (>0), pan_x, pan_y (finite numbers).
 
-The canvas defines the output sky frame. View state affects only the saved presentation view; a crop change must update canvas geometry. Resolution changes preserve sky extent by adjusting pixel scale and retaining aspect ratio.
+The canvas defines the output sky frame. View state affects only the saved presentation view; a crop change must update canvas geometry. Resolution changes preserve sky extent by adjusting pixel scale and retaining aspect ratio. A footprint-fitted canvas is materialized into these ordinary center, scale, width, height, and rotation fields before rendering; reopening a scene does not depend on recomputing its prior fitted geometry. The fitting algorithm and warning thresholds are defined by the [selected-footprint viewport specification](viewport_framing_spec.md).
 
 ### planes
 
@@ -156,6 +161,21 @@ Omitted activation settings are unfinished until materialized. An empty enabled_
 
 ### mapping
 
+`defaults.normalization` defines the fallback display normalization for mapped
+source planes. Each `mapping.planes[]` entry may override it with
+`normalization`. A normalization object contains:
+
+- `mode`: `native`, `percentile`, or `fixed_bounds`; omission resolves to `native` for revision-one compatibility.
+- `black_percentile` and `white_percentile`: finite percentages in `[0,100]`, with black lower than white.
+- `black_value` and `white_value`: required finite native-domain values for `fixed_bounds`, with black lower than white.
+- `reference`: optional locked region-reference identity and diagnostics. It records region, branch, grid, source and unit identities, coverage policy, requested percentiles, resolved bounds, sample count, clipping fractions, and `locked=true`. It is valid only with `fixed_bounds` and the outer bounds must match it.
+- `stretch`: `linear`, `asinh`, or `gamma`.
+- `stretch_parameter`: finite positive number.
+- `gain`: finite nonnegative number.
+
+Per-plane display normalization occurs before RGB weights. It is distinct from
+the output-channel processing stored in `tone`.
+
 defaults: object with strategy=continuum or wavelength_order.
 planes: array of explicit contribution objects, each containing exactly one selector (plane or filter), optional label, and rgb with finite red, green, blue values.
 derived_planes: optional array of derived-plane definitions.
@@ -164,14 +184,60 @@ Explicit contributions take precedence over the automatic strategy. Render readi
 
 A derived-plane definition requires name and operation (linear_combination or ratio). A term is {plane: nonblank string, weight: finite number}. linear_combination requires a nonempty terms array. ratio requires nonempty numerator and denominator arrays and finite epsilon>0. All references must resolve to source planes or previously defined derived planes; cycles are invalid.
 
+### coverage
+
+`policy` is `available_contributors` or `common_required_bands`; omission resolves
+to the legacy `available_contributors` behavior. `tone_reference` is
+`output_support` or `common_required_bands`; omission retains legacy output-support
+statistics, while new recommended scene defaults explicitly select common-band
+statistics with union output. `crop` is `none` or
+`bounding_box`, and `padding_pixels` is a nonnegative integer. Common support is
+the intersection of every enabled nonzero mapped band and derived dependency.
+Bounding crop retains every disconnected output-support component and every
+unsupported internal hole, clips padding to the source raster, and applies the
+same slice to output WCS. An empty common intersection is a render error whenever
+common support is selected for output or brightness-reference statistics. The
+resolved tone transform is applied to union-valid pixels without contributor-count
+normalization or partial-area gain adjustment.
+
 ### tone
 
-stretch: object keyed by red, green, blue; each channel has kind (asinh or gamma) and parameter (>0).
+`application` is `per_channel` or `shared_intensity`; omission preserves legacy
+`per_channel`. `gamut_policy` is `clip` or `rescale`; omission preserves `clip`.
+
+stretch: object keyed by red, green, blue; each channel has a method definition.
+`linear` has no parameter, `asinh` and `gamma` require parameter (>0), and `ghs`
+requires stretch_factor `[0,20]`, local_intensity `[-5,15]`, symmetry_point,
+shadow_protection, and highlight_protection satisfying
+`0 <= shadow_protection <= symmetry_point <= highlight_protection <= 1`.
+`shared_stretch` uses the same method definition and is required only for
+shared-intensity application.
 percentiles: black and white numbers in [0,100], with black < white.
 gain and bias: objects with finite red, green, blue values.
 saturation: finite number >=0.
+`auto_stretch` optionally records the locked AUTOSTRETCH-001 proposal identity,
+requested target, resolved parameter, sample diagnostics, confidence, and clipping
+estimates. Its presence never triggers re-estimation.
 
-All tone fields and all three channels are required at Render readiness. Tone is per output channel, not per source plane.
+All legacy tone fields and all three channels are required at Render readiness.
+Shared-intensity mode also requires `shared_stretch`. Tone operates on output RGB,
+not source planes.
+
+### background
+
+`mode` is `off` or `pedestal`. Pedestal mode requires one or more ICRS
+axis-aligned inclusion rectangles and permits optional ICRS exclusion rectangles.
+Each rectangle has a stable `region_id`, center RA/Dec, and positive width/height
+in arcseconds. Pixel-center WCS rasterization defines membership.
+
+The estimator stores `sigma`, `max_iterations`, `minimum_samples`, and
+`minimum_valid_fraction`. `black_reference_policy` is `legacy_percentile` or
+`corrected_zero`. Automatic estimates are proposals only. A render in pedestal
+mode requires persisted `resolved_branches[branch]` values for every inspected
+aligned plane in that branch; each value records pedestal, diagnostic counts,
+spread, unit, grid, lineage, and selection identity. Original and deconvolved
+branches resolve independently. Reopening or composing from a checkpoint uses the
+stored values without re-estimation.
 
 ### psf and execution
 
@@ -185,7 +251,9 @@ execution: optional fail_fast (boolean), log_file (nonblank string), debug_to_co
 
 Each assets map key is a nonblank ID unique within the card. Each record requires kind and exactly one of path or uri.
 
-kind is source, discovery_thumbnail, render_image, render_thumbnail, export_image, aligned_planes, footprint, candidate_manifest, provenance, or psf_kernel.
+kind is source, discovery_thumbnail, render_image, render_thumbnail, export_image,
+aligned_planes, checkpoint_manifest, footprint, candidate_manifest, provenance, or
+psf_kernel, background_diagnostic, or background_region_overlay.
 path is a relative path resolved against the card directory; it cannot escape that directory.
 uri is an authoritative archive/cache locator; fetching it is a separate action.
 
@@ -202,10 +270,15 @@ Each renders entry requires:
 - content_revision: positive integer, the scene inputs used for this render.
 - branch: original or deconvolved.
 - image_asset_id: reference to a render_image.
-- inputs: snapshot of the effective target, search, selection, canvas, planes, mapping, tone, and psf sections used for this render.
+- inputs: snapshot of the effective target, search, selection, canvas, planes, coverage, mapping, tone, psf, and background sections used for this render.
 - provenance_asset_id: reference to execution provenance.
 
-Optional members: thumbnail_asset_id (render_thumbnail reference), aligned_plane_asset_ids (array of aligned_planes references), footprint_asset_id (footprint reference).
+Optional members: high_depth_image_asset_id (the branch's uint16 TIFF render_image
+reference), thumbnail_asset_id (render_thumbnail reference), aligned_plane_asset_ids
+(array of aligned_planes references), checkpoint_manifest_asset_id (the matching
+checkpoint_manifest reference), and footprint_asset_id (footprint reference).
+`background_diagnostic_asset_ids` may reference the branch's
+`background_diagnostic` and `background_region_overlay` assets.
 
 The inputs snapshot contains the same field vocabulary as the live scene definition, not another project format. It has no renders, exports, or nested history. Referenced assets must remain resolvable within the card. This preserves how older images were made after the working settings change.
 
@@ -222,13 +295,22 @@ Thumbnails and renders extend the JSON through asset/history records. Binary byt
 ## 8. Save and revision rules
 
 1. First save assigns timestamps and content_revision=1; creation can occur before a target is selected.
-2. Each accepted change to target, selection, search, canvas geometry, plane activation, mapping, tone, or PSF advances the content revision, including successive unsaved edits. This prevents two different run snapshots sharing a revision. View-only state is excluded.
+2. Each accepted change to target, selection, search, canvas geometry, plane activation, coverage, mapping, tone, PSF, or background advances the content revision, including successive unsaved edits. This prevents two different run snapshots sharing a revision. View-only state is excluded.
 3. Search-constraint changes affecting discovery advance the revision conservatively. Title, description, discovery provenance, view-only pan/zoom, output destination/format, execution policy, and newly appended artifacts do not invalidate existing render inputs.
 4. A render uses a fixed snapshot of its inputs. Editing during processing cannot cause its completed record to claim newer inputs.
 5. A save may commit settings and newly completed artifact references together. Required referenced binaries are written completely before publishing their JSON references.
 6. Atomic replacement of the JSON is the commit point. Failure retains the previous readable card and its referenced assets. Unreferenced partial artifacts may exist after interruption but must not appear as completed results.
-7. Duplicate creates a new scene_id and independent working settings. Generated history may be omitted in the duplicate; the initial duplicate is explicitly shown as a draft until saved. Immutable cached sources may be shared.
+7. Duplicating a user-owned scene creates a new scene_id and independent working
+   settings. Its initial display title receives the generated ` copy` suffix, but
+   its canonical storage key derives from the source display title and new scene
+   ID before that suffix is added. Materializing a bundled example is a separate
+   library operation: it copies the validated example JSON with its existing
+   scene_id and exact filename into the effective scene directory, without copying
+   binary assets.
 8. Unsupported schema versions and unknown fields are rejected with field-specific diagnostics, without rewriting the original document.
+9. An accepted display-title edit updates `title` and `updated_at` only. It does
+   not advance `content_revision`, rename the card or asset root, change scene
+   identity, rewrite history, or alter current-render matching.
 
 ## 9. Minimal valid card
 
@@ -274,5 +356,24 @@ and consumer cutover were verified.
 - Original and deconvolved readiness are separate; enabled deconvolution requires explicit per-plane policy and kernel references. Missing binary files are separately reported dependencies.
 - Save returns the committed card with its updated timestamp. Existing history is append-only; previously registered asset locations and metadata cannot be replaced under the same asset ID. A new render must match its recorded revision and snapshot; a current thumbnail must match the current effective inputs.
 - A render snapshot requires selection, canvas, planes, mapping, tone, and psf. Target and search are optional for pinned-product scenes. Execution policy and view-only state do not affect preview currency.
-- Duplication starts a new identity and revision, omits generated render/export history, and copies retained local working assets into an independent associated folder. URI-backed immutable cached sources may remain shared. Missing required local copies fail explicitly. Saved/unsaved state is UI state, not a stored lifecycle flag.
+- User-scene duplication starts a new identity and revision, omits generated
+  render/export history, and commits retained local inputs at independently
+  addressable paths inside the new associated folder. Immutable local inputs may
+  be materialized as same-volume hard links; a verified bounded-memory copy is the
+  fallback. Unlinking or deleting either scene does not remove the other path.
+  URI-backed immutable cached sources may remain shared. Missing required local
+  inputs fail before the new card is published.
+- Bundled example materialization preserves the JSON identity and exact filename. If a user copy already exists, replacement requires confirmation and atomically replaces only the JSON; its matching asset root is retained. Retained but unreferenced files do not become scene-card assets implicitly.
+- Canvas changes invalidate earlier reprojections for the current state. Unreferenced stale reprojection files may be overwritten or replaced, but downloaded sources and files referenced by retained successful render records remain immutable.
 - Atomic saves protect against interrupted writes, but concurrent editing of one file by multiple processes is outside this revision's scope.
+
+
+### Saved NaN bridge setting (2026-10-08)
+
+Optional `bridge.enabled` is a strict boolean; omission means On. Explicit Off
+persists through save/reopen/duplicate. Effective inputs normalize omission to
+On, and every new render input snapshot stores the explicit effective setting.
+Historical input snapshots without `bridge` remain readable history but are
+stale for current-preview/export certification. Switch changes invalidate aligned
+producer dependencies and require fresh reprojection. See
+[BRIDGE-WIRE-002](reprojection_bridge_algorithm.md) for mask/checkpoint contracts.

@@ -7,7 +7,7 @@ from pathlib import PureWindowsPath
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, JsonValue, model_validator
 
 
 def nonblank(value: str) -> str:
@@ -196,6 +196,7 @@ class Canvas(Model):
     height: PositiveInt | None = None
     rotation_deg: RA | None = None
     flux_conserving: bool | None = None
+    frame_origin: Literal["search_region", "selected_footprints", "user"] | None = None
     view_state: ViewState | None = None
 
     @model_validator(mode="before")
@@ -218,10 +219,66 @@ class Planes(Model):
         return self
 
 
+class Coverage(Model):
+    policy: Literal["available_contributors", "common_required_bands"] | None = None
+    tone_reference: Literal["output_support", "common_required_bands"] | None = None
+    crop: Literal["none", "bounding_box"] | None = None
+    padding_pixels: Annotated[int, Field(ge=0)] | None = None
+
+
 class RGB(Model):
     red: float | None = None
     green: float | None = None
     blue: float | None = None
+
+
+class NormalizationReference(Model):
+    reference_id: Text
+    kind: Literal["region"]
+    region_ids: list[Text]
+    branch: Literal["original", "deconvolved"]
+    grid_id: Text
+    source_ids: list[Text]
+    unit: Text | None = None
+    coverage_policy: Literal["available_contributors", "common_required_bands"]
+    tone_reference_policy: Literal["output_support", "common_required_bands"] | None = None
+    black_percentile: Annotated[float, Field(ge=0, le=100)]
+    white_percentile: Annotated[float, Field(ge=0, le=100)]
+    black_value: float
+    white_value: float
+    sample_count: PositiveInt
+    low_clipping_fraction: Annotated[float, Field(ge=0, le=1)]
+    high_clipping_fraction: Annotated[float, Field(ge=0, le=1)]
+    locked: Literal[True]
+
+
+class PlaneNormalization(Model):
+    mode: Literal["native", "percentile", "fixed_bounds"] | None = None
+    black_percentile: Annotated[float, Field(ge=0, le=100)] | None = None
+    white_percentile: Annotated[float, Field(ge=0, le=100)] | None = None
+    black_value: float | None = None
+    white_value: float | None = None
+    reference: NormalizationReference | None = None
+    stretch: Literal["linear", "asinh", "gamma"] | None = None
+    stretch_parameter: Positive | None = None
+    gain: Nonnegative | None = None
+
+    @model_validator(mode="after")
+    def percentile_order(self) -> PlaneNormalization:
+        if (
+            self.black_percentile is not None
+            and self.white_percentile is not None
+            and self.black_percentile >= self.white_percentile
+        ):
+            raise ValueError("black_percentile must be lower than white_percentile")
+        if self.mode == "fixed_bounds":
+            if self.black_value is None or self.white_value is None:
+                raise ValueError("fixed_bounds requires black_value and white_value")
+            if self.black_value >= self.white_value:
+                raise ValueError("black_value must be lower than white_value")
+        if self.reference is not None and self.mode != "fixed_bounds":
+            raise ValueError("normalization reference requires fixed_bounds mode")
+        return self
 
 
 class Contribution(Model):
@@ -229,6 +286,7 @@ class Contribution(Model):
     filter: Text | None = None
     label: Text | None = None
     rgb: RGB | None = None
+    normalization: PlaneNormalization | None = None
 
     @model_validator(mode="after")
     def selector(self) -> Contribution:
@@ -253,6 +311,7 @@ class DerivedPlane(Model):
 
 class MappingDefaults(Model):
     strategy: Literal["continuum", "wavelength_order"] | None = None
+    normalization: PlaneNormalization | None = None
 
 
 class Mapping(Model):
@@ -270,8 +329,29 @@ class Mapping(Model):
 
 
 class Stretch(Model):
-    kind: Literal["asinh", "gamma"] | None = None
+    kind: Literal["linear", "asinh", "gamma", "ghs"] | None = None
     parameter: Positive | None = None
+    stretch_factor: Annotated[float, Field(ge=0, le=20)] | None = None
+    local_intensity: Annotated[float, Field(ge=-5, le=15)] | None = None
+    symmetry_point: Annotated[float, Field(ge=0, le=1)] | None = None
+    shadow_protection: Annotated[float, Field(ge=0, le=1)] | None = None
+    highlight_protection: Annotated[float, Field(ge=0, le=1)] | None = None
+
+    @model_validator(mode="after")
+    def ghs_order(self) -> "Stretch":
+        if (
+            self.shadow_protection is not None
+            and self.symmetry_point is not None
+            and self.highlight_protection is not None
+            and not (
+                self.shadow_protection <= self.symmetry_point
+                <= self.highlight_protection
+            )
+        ):
+            raise ValueError(
+                "shadow_protection must be <= symmetry_point <= highlight_protection"
+            )
+        return self
 
 
 class Stretches(Model):
@@ -291,12 +371,87 @@ class Percentiles(Model):
         return self
 
 
+class AutoStretchResolution(Model):
+    algorithm_version: Literal["autostretch-shared-asinh-v1"]
+    reference_id: Text
+    branch: Literal["original", "deconvolved"]
+    grid_id: Text
+    source_ids: list[Text]
+    sample_count: Annotated[int, Field(ge=256)]
+    source_median: Annotated[float, Field(gt=0, lt=0.1)]
+    robust_spread: Positive
+    object_fraction: Annotated[float, Field(ge=0, le=0.25)]
+    target_median: Literal[0.1]
+    resolved_parameter: Positive
+    low_clipping_fraction: Annotated[float, Field(ge=0, le=1)]
+    high_clipping_fraction: Annotated[float, Field(ge=0, le=1)]
+    confidence: Literal["high", "qualified"]
+    locked: Literal[True]
+
+
 class Tone(Model):
     stretch: Stretches | None = None
     percentiles: Percentiles | None = None
     gain: RGB | None = None
     bias: RGB | None = None
     saturation: Nonnegative | None = None
+    application: Literal["per_channel", "shared_intensity"] | None = None
+    shared_stretch: Stretch | None = None
+    gamut_policy: Literal["clip", "rescale"] | None = None
+    auto_stretch: AutoStretchResolution | None = None
+
+
+class SkyRectangle(Model):
+    region_id: Text
+    center_ra_deg: RA
+    center_dec_deg: DEC
+    width_arcsec: Positive
+    height_arcsec: Positive
+
+
+class BackgroundEstimator(Model):
+    clip_sigma: Positive | None = None
+    max_iterations: Annotated[int, Field(ge=1, le=50)] | None = None
+    minimum_samples: PositiveInt | None = None
+    minimum_valid_fraction: Annotated[float, Field(gt=0, le=1)] | None = None
+
+
+class ResolvedBackgroundPlane(Model):
+    selection_key: Text
+    branch: Literal["original", "deconvolved"]
+    grid_id: Text
+    source_ids: list[Text]
+    unit: Text | None = None
+    pedestal: float
+    geometric_sample_count: PositiveInt
+    common_valid_count: PositiveInt
+    common_valid_fraction: Annotated[float, Field(gt=0, le=1)]
+    sample_count: PositiveInt
+    rejected_count: Annotated[int, Field(ge=0)]
+    median: float
+    robust_spread: Nonnegative
+    residual_median: float
+
+
+class Background(Model):
+    mode: Literal["off", "pedestal"] | None = None
+    black_reference_policy: Literal["legacy_percentile", "corrected_zero"] | None = None
+    inclusion_regions: list[SkyRectangle] | None = None
+    exclusion_regions: list[SkyRectangle] | None = None
+    estimator: BackgroundEstimator | None = None
+    resolved_branches: dict[Text, dict[Text, ResolvedBackgroundPlane]] | None = None
+
+    @model_validator(mode="after")
+    def region_ids(self) -> "Background":
+        inclusion = [region.region_id for region in self.inclusion_regions or []]
+        exclusion = [region.region_id for region in self.exclusion_regions or []]
+        unique(inclusion, "background.inclusion_regions")
+        unique(exclusion, "background.exclusion_regions")
+        if set(inclusion) & set(exclusion):
+            raise ValueError("background inclusion and exclusion region IDs must be distinct")
+        if set(self.resolved_branches or {}) - {"original", "deconvolved"}:
+            raise ValueError("background resolved branches must be original or deconvolved")
+        return self
 
 
 class PSFPlane(Model):
@@ -312,6 +467,10 @@ class PSF(Model):
     per_plane: dict[Text, PSFPlane] | None = None
 
 
+class Bridge(Model):
+    enabled: StrictBool = True
+
+
 class Execution(Model):
     fail_fast: bool | None = None
     log_file: Text | None = None
@@ -322,7 +481,8 @@ class Execution(Model):
 class Asset(Model):
     kind: Literal["source", "discovery_thumbnail", "render_image", "render_thumbnail",
                   "export_image", "aligned_planes", "footprint", "candidate_manifest",
-                  "provenance", "psf_kernel"]
+                  "provenance", "psf_kernel", "checkpoint_manifest",
+                  "background_diagnostic", "background_region_overlay"]
     path: Annotated[Text, AfterValidator(relative_path)] | None = None
     uri: Text | None = None
     media_type: Text | None = None
@@ -348,8 +508,11 @@ class Inputs(Model):
     selection: Selection
     canvas: Canvas
     planes: Planes
+    coverage: Coverage = Field(default_factory=Coverage)
     mapping: Mapping
     tone: Tone
+    bridge: Bridge | None = None
+    background: Background | None = None
     psf: PSF
 
     @model_validator(mode="after")
@@ -373,6 +536,14 @@ class Inputs(Model):
                 value = value.get(key) if isinstance(value, dict) else None
             if value is None:
                 raise ValueError(f"inputs.{path}: successful history requires complete inputs")
+        background = data.get("background")
+        if background is not None:
+            for path in ("mode", "black_reference_policy", "inclusion_regions",
+                         "exclusion_regions", "estimator", "resolved_branches"):
+                if path not in background:
+                    raise ValueError(
+                        f"inputs.background.{path}: successful history requires complete inputs"
+                    )
         if self.canvas.center is None or self.canvas.center.mode != "explicit":
             raise ValueError("inputs.canvas.center must be explicit")
         products = {p.product_id for p in self.selection.products or []}
@@ -400,11 +571,14 @@ class Render(Model):
     content_revision: PositiveInt
     branch: Literal["original", "deconvolved"]
     image_asset_id: Text
+    high_depth_image_asset_id: Text | None = None
     inputs: Inputs
     provenance_asset_id: Text
     thumbnail_asset_id: Text | None = None
     aligned_plane_asset_ids: list[Text] | None = None
     footprint_asset_id: Text | None = None
+    checkpoint_manifest_asset_id: Text | None = None
+    background_diagnostic_asset_ids: list[Text] | None = None
 
     @model_validator(mode="after")
     def processed_branch(self) -> Render:
@@ -448,8 +622,11 @@ class SceneCard(Model):
     selection: Selection | None = None
     canvas: Canvas | None = None
     planes: Planes | None = None
+    coverage: Coverage | None = None
     mapping: Mapping | None = None
     tone: Tone | None = None
+    bridge: Bridge | None = None
+    background: Background | None = None
     psf: PSF | None = None
     execution: Execution | None = None
     assets: dict[Text, Asset] | None = None
@@ -488,9 +665,18 @@ class SceneCard(Model):
                 raise ValueError("renders.inputs: one revision cannot identify different inputs")
             revisions[render.content_revision] = snapshot
             reference(render.image_asset_id, ("render_image",), "renders.image_asset_id")
+            reference(render.high_depth_image_asset_id, ("render_image",),
+                      "renders.high_depth_image_asset_id")
             reference(render.provenance_asset_id, ("provenance",), "renders.provenance_asset_id")
             reference(render.thumbnail_asset_id, ("render_thumbnail",), "renders.thumbnail_asset_id")
             reference(render.footprint_asset_id, ("footprint",), "renders.footprint_asset_id")
+            reference(render.checkpoint_manifest_asset_id, ("checkpoint_manifest",),
+                      "renders.checkpoint_manifest_asset_id")
+            for aid in render.background_diagnostic_asset_ids or []:
+                reference(
+                    aid, ("background_diagnostic", "background_region_overlay"),
+                    "renders.background_diagnostic_asset_ids",
+                )
             for aid in render.aligned_plane_asset_ids or []:
                 reference(aid, ("aligned_planes",), "renders.aligned_plane_asset_ids")
             for product in render.inputs.selection.products or []:
@@ -502,6 +688,12 @@ class SceneCard(Model):
             if export.render_id not in render_ids:
                 raise ValueError("exports.render_id: unknown render")
             reference(export.asset_id, ("export_image",), "exports.asset_id")
+        if self.discovery is not None:
+            reference(
+                self.discovery.candidate_manifest_asset_id,
+                ("candidate_manifest",),
+                "discovery.candidate_manifest_asset_id",
+            )
         reference(self.thumbnail_asset_id, ("discovery_thumbnail", "render_thumbnail"), "thumbnail_asset_id")
         if self.thumbnail_asset_id and assets[self.thumbnail_asset_id].kind == "render_thumbnail":
             if not any(r.thumbnail_asset_id == self.thumbnail_asset_id
@@ -512,7 +704,7 @@ class SceneCard(Model):
         return self
 
 
-INPUT_FIELDS = ("target", "search", "selection", "canvas", "planes", "mapping", "tone", "psf")
+INPUT_FIELDS = ("target", "search", "selection", "canvas", "planes", "coverage", "mapping", "tone", "bridge", "background", "psf")
 
 
 def document(model: Model) -> dict[str, Any]:
@@ -523,6 +715,14 @@ def document(model: Model) -> dict[str, Any]:
 def effective_inputs(model: SceneCard | Inputs) -> dict[str, Any]:
     data = document(model)
     result = {key: data[key] for key in INPUT_FIELDS if key in data}
+    result["bridge"] = {"enabled": (model.bridge.enabled if model.bridge is not None else True)}
     if "canvas" in result:
         result["canvas"].pop("view_state", None)
     return result
+
+
+def bridge_snapshot_matches(inputs: Inputs, card: SceneCard) -> bool:
+    # Missing old-history metadata cannot certify a new default-On bridge result.
+    return inputs.bridge is not None and inputs.bridge.enabled == (
+        card.bridge.enabled if card.bridge is not None else True
+    )

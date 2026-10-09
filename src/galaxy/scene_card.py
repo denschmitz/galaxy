@@ -5,12 +5,13 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -98,7 +99,7 @@ def dependency_issues(card: SceneCard, path: str | Path) -> list[DependencyIssue
             if not binary.is_file():
                 issues.append(DependencyIssue(aid, "missing", str(binary)))
                 continue
-            _verify_bytes(asset, binary.read_bytes())
+            _verify_file(asset, binary)
         except (OSError, ValueError) as exc:
             issues.append(DependencyIssue(aid, "invalid", str(exc)))
     return issues
@@ -108,6 +109,19 @@ def _verify_bytes(asset: Asset, content: bytes) -> None:
     if asset.byte_count is not None and len(content) != asset.byte_count:
         raise ValueError("asset byte_count mismatch")
     if asset.sha256 is not None and hashlib.sha256(content).hexdigest() != asset.sha256.lower():
+        raise ValueError("asset sha256 mismatch")
+
+
+def _verify_file(asset: Asset, path: Path, *, chunk_size: int = 1024 * 1024) -> None:
+    if asset.byte_count is not None and path.stat().st_size != asset.byte_count:
+        raise ValueError("asset byte_count mismatch")
+    if asset.sha256 is None:
+        return
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    if digest.hexdigest() != asset.sha256.lower():
         raise ValueError("asset sha256 mismatch")
 
 
@@ -228,7 +242,7 @@ def save_scene(
         if aid not in old_assets and aid not in contents:
             if not binary.is_file():
                 raise ValueError(f"new asset must be complete before save: {aid}")
-            _verify_bytes(assets[aid], binary.read_bytes())
+            _verify_file(assets[aid], binary)
     # Newly appended history must not point at missing old assets either.
     old_render_ids = {r.render_id for r in previous.renders or []} if previous else set()
     new_history_assets: set[str] = set()
@@ -244,7 +258,7 @@ def save_scene(
         if aid in paths and aid not in contents:
             if not paths[aid].is_file():
                 raise ValueError(f"completed history requires available binary: {aid}")
-            _verify_bytes(assets[aid], paths[aid].read_bytes())
+            _verify_file(assets[aid], paths[aid])
     destination.parent.mkdir(parents=True, exist_ok=True)
     for aid, payload in contents.items():
         binary = paths[aid]
@@ -266,7 +280,13 @@ def save_scene(
 def append_render(
     card: SceneCard, *, snapshot: SceneCard, branch: Branch, plane_filters: Mapping[str, str],
     image_asset_id: str, provenance_asset_id: str, assets: Mapping[str, Asset],
-    thumbnail_asset_id: str | None = None, now: str | None = None,
+    thumbnail_asset_id: str | None = None,
+    high_depth_image_asset_id: str | None = None,
+    checkpoint_manifest_asset_id: str | None = None,
+    background_diagnostic_asset_ids: list[str] | None = None,
+    aligned_plane_asset_ids: list[str] | None = None,
+    footprint_asset_id: str | None = None,
+    now: str | None = None,
 ) -> SceneCard:
     """Attach a successful completed run using its frozen launch-time card.
 
@@ -279,7 +299,10 @@ def append_render(
         raise ValueError("render snapshot must belong to this scene and an existing revision")
     if snapshot.content_revision == card.content_revision and effective_inputs(snapshot) != effective_inputs(card):
         raise ValueError("same revision cannot represent different inputs")
-    problems = readiness(snapshot, "render", plane_filters=plane_filters, branch=branch)
+    problems = readiness(
+        snapshot, "render", plane_filters=plane_filters, branch=branch,
+        inspected_plane_ids=True,
+    )
     if problems:
         raise ValueError("\n".join(f"{p.path}: {p.message}" for p in problems))
     data = document(card)
@@ -298,6 +321,16 @@ def append_render(
     }
     if thumbnail_asset_id:
         record_data["thumbnail_asset_id"] = thumbnail_asset_id
+    if high_depth_image_asset_id:
+        record_data["high_depth_image_asset_id"] = high_depth_image_asset_id
+    if checkpoint_manifest_asset_id:
+        record_data["checkpoint_manifest_asset_id"] = checkpoint_manifest_asset_id
+    if background_diagnostic_asset_ids:
+        record_data["background_diagnostic_asset_ids"] = background_diagnostic_asset_ids
+    if aligned_plane_asset_ids:
+        record_data["aligned_plane_asset_ids"] = aligned_plane_asset_ids
+    if footprint_asset_id:
+        record_data["footprint_asset_id"] = footprint_asset_id
     record = Render.model_validate(record_data)
     data.setdefault("renders", []).append(document(record))
     if thumbnail_asset_id and snapshot.content_revision == card.content_revision:
@@ -308,20 +341,41 @@ def append_render(
 def duplicate_scene(
     card: SceneCard, source_path: str | Path, destination_path: str | Path, *,
     title: str | None = None, now: str | None = None,
+    materialization: Literal["copy", "link_or_copy"] = "copy",
+    identity: SceneCard | None = None,
 ) -> SceneCard:
-    """Save a new identity with independent local working assets and no history."""
+    """Commit a new identity with independently addressed immutable inputs.
+
+    ``link_or_copy`` uses deletion-safe same-volume hard links when possible and a
+    bounded-memory byte copy otherwise. Registered inputs remain immutable.
+    """
     original = SceneCard.model_validate(document(card))
     destination = Path(destination_path).resolve()
     if destination.exists() or destination == Path(source_path).resolve():
         raise ValueError("duplicate destination must be a new file")
+    if materialization not in ("copy", "link_or_copy"):
+        raise ValueError("duplicate materialization must be copy or link_or_copy")
     data = document(original)
-    fresh = document(create_scene(original.title if title is None else title, now=now))
+    identity_card = (
+        create_scene(original.title if title is None else title, now=now)
+        if identity is None else SceneCard.model_validate(document(identity))
+    )
+    if identity_card.scene_id == original.scene_id or identity_card.content_revision != 1:
+        raise ValueError("duplicate identity must be a new revision-one scene")
+    identity_data = document(identity_card)
+    fresh = {
+        key: identity_data[key]
+        for key in (
+            "document_type", "schema_version", "scene_id", "title", "created_at",
+            "updated_at", "content_revision",
+        )
+    }
     data.update(fresh)
     data.pop("renders", None)
     data.pop("exports", None)
     thumbnail = data.pop("thumbnail_asset_id", None)
     retained: dict[str, Any] = {}
-    contents: dict[str, bytes] = {}
+    local_inputs: list[tuple[Asset, Path, str]] = []
     kinds = {"source", "discovery_thumbnail", "candidate_manifest", "psf_kernel"}
     folder = f"{destination.stem}.{fresh['scene_id']}.assets"
     for aid, asset in (original.assets or {}).items():
@@ -330,17 +384,40 @@ def duplicate_scene(
         entry = document(asset)
         if asset.path is not None:
             binary = asset_path(source_path, asset)
-            content = binary.read_bytes()
-            _verify_bytes(asset, content)
-            entry["path"] = f"{folder}/{hashlib.sha256(aid.encode()).hexdigest()}{binary.suffix}"
-            contents[aid] = content
+            if not binary.is_file():
+                raise ValueError(f"duplicate source asset is missing: {aid}")
+            filename = f"{hashlib.sha256(aid.encode()).hexdigest()}{binary.suffix}"
+            entry["path"] = f"{folder}/{filename}"
+            local_inputs.append((asset, binary, filename))
         retained[aid] = entry
     if retained or "assets" in data:
         data["assets"] = retained
     if thumbnail in retained and retained[thumbnail]["kind"] == "discovery_thumbnail":
         data["thumbnail_asset_id"] = thumbnail
     duplicate = SceneCard.model_validate(data)
-    return save_scene(duplicate, destination, asset_contents=contents, now=now)
+    if not local_inputs:
+        return save_scene(duplicate, destination, now=now)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    asset_root = destination.parent / folder
+    if asset_root.exists():
+        raise ValueError("duplicate asset destination must be new")
+    asset_root.mkdir()
+    try:
+        for asset, source, filename in local_inputs:
+            target = asset_root / filename
+            if materialization == "link_or_copy":
+                try:
+                    os.link(source, target)
+                except OSError:
+                    shutil.copyfile(source, target)
+            else:
+                shutil.copyfile(source, target)
+        return save_scene(duplicate, destination, now=now)
+    except Exception:
+        if not destination.exists():
+            shutil.rmtree(asset_root, ignore_errors=True)
+        raise
 
 
 def duplicate_scene_draft(

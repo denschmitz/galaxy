@@ -12,8 +12,9 @@ import numpy as np
 from reproject.adaptive.core import _reproject_adaptive_2d
 from reproject.interpolation.core import _reproject_full
 
+from galaxy.bridge import NativePresentation
 from galaxy.processing_config import CanvasConfig
-from galaxy.fitsio import FITSPlane
+from galaxy.fitsio import FITSPlane, _validated_coverage, validated_grid_identity
 
 
 MAX_DERIVED_OUTPUT_DIMENSION = 100_000
@@ -29,6 +30,69 @@ class ReprojectedPlane:
     data: np.ndarray
     footprint: np.ndarray
     metadata: dict[str, object]
+    wcs: WCS | None = None
+    valid: np.ndarray | None = None
+    domain: str = "aligned_linear"
+    branch: str | None = None
+    source_ids: tuple[str, ...] = ()
+    parent_ids: tuple[str, ...] = ()
+    grid_id: str | None = None
+    presentation_support: np.ndarray | None = None
+    estimate_influence: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        self.data = np.asarray(self.data, dtype=np.float32)
+        if self.data.ndim != 2:
+            raise ValueError(f"plane '{self.plane_id}' values must be two-dimensional")
+        self.footprint = _validated_coverage(self.plane_id, self.footprint, self.data.shape)
+        finite = np.isfinite(self.data)
+        if self.valid is None:
+            self.valid = finite & (self.footprint > 0)
+        else:
+            self.valid = np.asarray(self.valid, dtype=bool)
+            if self.valid.shape != self.data.shape:
+                raise ValueError(f"plane '{self.plane_id}' validity must match values")
+            if np.any(self.valid & ~finite):
+                raise ValueError(f"plane '{self.plane_id}' has nonfinite usable values")
+            if np.any(self.valid & (self.footprint <= 0)):
+                raise ValueError(f"plane '{self.plane_id}' cannot be valid without coverage")
+        self.presentation_support = _validated_coverage(
+            self.plane_id,
+            self.footprint if self.presentation_support is None else self.presentation_support,
+            self.data.shape,
+        )
+        if self.estimate_influence is None:
+            self.estimate_influence = np.zeros(self.data.shape, dtype=bool)
+        else:
+            raw = np.asarray(self.estimate_influence)
+            if raw.shape != self.data.shape or not np.isin(raw, [0, 1]).all():
+                raise ValueError(f"plane '{self.plane_id}' estimate influence must be a matching binary mask")
+            self.estimate_influence = raw.astype(bool, copy=False)
+        usable = self.presentation_valid
+        if np.any(self.valid & ~usable):
+            raise ValueError(f"plane '{self.plane_id}' observations require presentation support")
+        if np.any(self.estimate_influence & ~usable):
+            raise ValueError(f"plane '{self.plane_id}' estimate influence requires presentation support")
+        self.branch = self.branch or str(self.metadata.get("artifact_branch") or "original")
+        self.source_ids = self.source_ids or (str(self.metadata.get("source_path") or self.plane_id),)
+        self.grid_id = validated_grid_identity(self.plane_id, self.wcs, self.data.shape, self.grid_id)
+
+    @property
+    def coverage(self) -> np.ndarray:
+        return self.footprint
+
+    @property
+    def presentation_valid(self) -> np.ndarray:
+        return np.isfinite(self.data) & (self.presentation_support > 0)
+
+    @property
+    def statistics_valid(self) -> np.ndarray:
+        return self.valid & ~self.estimate_influence
+
+    @property
+    def unit(self) -> str | None:
+        value = self.metadata.get("native_unit")
+        return None if value is None else str(value)
 
 
 def build_output_wcs(canvas: CanvasConfig, resolved_center: SkyCoord) -> tuple[WCS, tuple[int, int]]:
@@ -92,42 +156,65 @@ def derive_reference_output_wcs(
     return output_wcs, (expanded_height, expanded_width), diagnostics
 
 
+def _resample_values(
+    source: np.ndarray, source_wcs: WCS, output_wcs: WCS,
+    shape_out: tuple[int, int], flux_conserving: bool, *, scale_flux: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    dtype = np.float64 if flux_conserving else np.float32
+    array_out = np.empty(shape_out, dtype=dtype)
+    footprint_out = np.empty(shape_out, dtype=dtype)
+    options = dict(shape_out=shape_out, array_out=array_out,
+                   output_footprint=footprint_out, return_footprint=True)
+    if flux_conserving:
+        return _reproject_adaptive_2d(
+            np.asarray(source, dtype=dtype), source_wcs, output_wcs,
+            conserve_flux=scale_flux, **options,
+        )
+    return _reproject_full(np.asarray(source, dtype=dtype), source_wcs, output_wcs, **options)
+
+
 def reproject_plane(
     plane: FITSPlane,
     output_wcs: WCS,
     shape_out: tuple[int, int],
     flux_conserving: bool,
+    *, presentation: NativePresentation | None = None,
 ) -> ReprojectedPlane:
-    if flux_conserving:
-        array_out = np.empty(shape_out, dtype=np.float64)
-        footprint_out = np.empty(shape_out, dtype=np.float64)
-        data, footprint = _reproject_adaptive_2d(
-            np.asarray(plane.data, dtype=np.float64),
-            plane.wcs,
-            output_wcs,
-            shape_out=shape_out,
-            array_out=array_out,
-            output_footprint=footprint_out,
-            return_footprint=True,
-            conserve_flux=True,
+    if presentation is not None and presentation.observation is not plane:
+        raise ValueError("presentation must belong to the supplied observation plane")
+    source_data = np.where(plane.valid, plane.data, np.nan)
+    data, footprint = _resample_values(source_data, plane.wcs, output_wcs, shape_out, flux_conserving)
+    observed = np.isfinite(data) & np.isfinite(footprint) & (footprint > 0)
+    observation_coverage = np.where(observed, footprint, 0).astype(np.float32)
+    presentation_coverage = observation_coverage
+    influence = np.zeros(shape_out, dtype=bool)
+    if presentation is not None and presentation.estimate_mask.any():
+        # Keep the observational support and release the unused strict value pass.
+        del data, source_data
+        data, footprint = _resample_values(
+            np.where(presentation.support, presentation.values, np.nan),
+            plane.wcs, output_wcs, shape_out, flux_conserving,
         )
-    else:
-        array_out = np.empty(shape_out, dtype=np.float32)
-        footprint_out = np.empty(shape_out, dtype=np.float32)
-        data, footprint = _reproject_full(
-            np.asarray(plane.data, dtype=np.float32),
-            plane.wcs,
-            output_wcs,
-            shape_out=shape_out,
-            array_out=array_out,
-            output_footprint=footprint_out,
-            return_footprint=True,
+        supported = np.isfinite(data) & np.isfinite(footprint) & (footprint > 0)
+        presentation_coverage = np.where(supported, footprint, 0).astype(np.float32)
+        indicator = np.where(presentation.support, presentation.estimate_mask.astype(np.float32), np.nan)
+        projected_indicator, _ = _resample_values(
+            indicator, plane.wcs, output_wcs, shape_out, flux_conserving, scale_flux=False,
         )
+        influence = supported & np.isfinite(projected_indicator) & (projected_indicator > 0)
+    metadata = dict(plane.metadata)
+    metadata["valid_coverage_fraction"] = float(np.count_nonzero(observed) / observed.size)
+    metadata["support_contract_version"] = 1
+    if presentation is not None:
+        metadata["bridge"] = presentation.diagnostics.record()
     return ReprojectedPlane(
         plane_id=plane.plane_id,
-        data=np.nan_to_num(data.astype(np.float32), nan=0.0),
-        footprint=np.nan_to_num(footprint.astype(np.float32), nan=0.0),
-        metadata=dict(plane.metadata),
+        data=np.where(np.isfinite(data), data, 0).astype(np.float32),
+        footprint=observation_coverage,
+        metadata=metadata,
+        wcs=output_wcs.deepcopy(), valid=observed,
+        presentation_support=presentation_coverage, estimate_influence=influence,
+        source_ids=plane.source_ids, parent_ids=(plane.plane_id,),
     )
 
 
@@ -135,23 +222,29 @@ def save_reprojected_plane(plane: ReprojectedPlane, output_wcs: WCS, directory: 
     directory.mkdir(parents=True, exist_ok=True)
     image_path = directory / f"{plane.plane_id}.fits"
     footprint_path = directory / f"{plane.plane_id}_footprint.fits"
-    fits.PrimaryHDU(data=plane.data, header=output_wcs.to_header()).writeto(image_path, overwrite=True)
+    from galaxy.planes import support_hdus, _populate_plane_header
+    header = output_wcs.to_header()
+    _populate_plane_header(header, plane)
+    fits.HDUList([fits.PrimaryHDU(data=plane.data, header=header),
+                  *support_hdus(plane, output_wcs)]).writeto(image_path, overwrite=True)
     fits.PrimaryHDU(data=plane.footprint, header=output_wcs.to_header()).writeto(footprint_path, overwrite=True)
     return image_path, footprint_path
 
 
 def reproject_all(
-    planes: list[FITSPlane],
+    planes: list[FITSPlane | NativePresentation],
     output_wcs: WCS,
     shape_out: tuple[int, int],
     flux_conserving: bool,
     progress: Callable[[str], None] | None = None,
 ) -> list[ReprojectedPlane]:
     results: list[ReprojectedPlane] = []
-    for plane in planes:
+    for item in planes:
+        prepared = item if isinstance(item, NativePresentation) else None
+        plane = item.observation if prepared is not None else item
         if progress:
             progress(f"Reprojecting {plane.plane_id}")
-        results.append(reproject_plane(plane, output_wcs, shape_out, flux_conserving))
+        results.append(reproject_plane(plane, output_wcs, shape_out, flux_conserving, presentation=prepared))
     return results
 
 
@@ -185,14 +278,15 @@ def estimate_workspace_peak_bytes(
     plane_count: int,
     bytes_per_pixel: int,
     reprojection_method: str,
+    *, native_bridge_peak_bytes: int = 0,
 ) -> int:
     pixels = max(int(output_pixel_count), 0)
-    stored_plane_bytes = pixels * 8 * max(int(plane_count), 0)
+    stored_plane_bytes = pixels * 14 * max(int(plane_count), 0)
     current_plane_bytes = pixels * max(int(bytes_per_pixel), 0)
     if reprojection_method == REPROJECT_METHOD_ADAPTIVE_FLUX:
         current_plane_bytes += pixels * 8
     composition_bytes = pixels * 20
-    return stored_plane_bytes + current_plane_bytes + composition_bytes
+    return stored_plane_bytes + current_plane_bytes + composition_bytes + pixels * 40 + max(native_bridge_peak_bytes, 0)
 
 
 def get_system_memory_bytes() -> int | None:

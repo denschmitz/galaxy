@@ -12,7 +12,7 @@
 | REQ-DISC-009 | `src/galaxy/discovery_sources.py` | `tests/test_discovery_sources.py` | Covered |
 | REQ-DISC-010 | `src/galaxy/discovery_sources.py` | `tests/test_discovery_sources.py` | Covered |
 | REQ-DISC-011 | `src/galaxy/discovery_sources.py` | `tests/test_discovery_sources.py` | Covered |
-| REQ-CACHE-001 through REQ-CACHE-004; REQ-SOURCE-004 | `src/galaxy/discovery_cache.py`; `src/galaxy/ui.py` | `tests/test_discovery_cache.py`; `tests/test_ui.py` | Covered: disk persistence, query keys, retrieval labels, staleness, explicit stale reuse, and forced refresh |
+| REQ-CACHE-001 through REQ-CACHE-005; REQ-SOURCE-004 | `src/galaxy/discovery_cache.py`; `src/galaxy/ui.py` | `tests/test_discovery_cache.py`; `tests/test_ui.py` | Covered: canonical application-cache placement, disk persistence, query keys, retrieval labels, staleness, explicit stale reuse, and forced refresh |
 
 The adapter tests use an offline CSV fixture matching the source-linked ten-column
 contract. No live network is required by the suite.

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, model_validator
 
 
 PROJECT_FORMAT_REVISION = 1
@@ -131,6 +132,13 @@ class PlanesConfig(GalaxyProjectModel):
     export_multiplane_fits: bool = True
 
 
+class CoverageConfig(GalaxyProjectModel):
+    policy: Literal["available_contributors", "common_required_bands"] = "available_contributors"
+    tone_reference: Literal["output_support", "common_required_bands"] = "output_support"
+    crop: Literal["none", "bounding_box"] = "none"
+    padding_pixels: int = Field(default=0, ge=0)
+
+
 class PlaneContributionConfig(GalaxyProjectModel):
     plane: str
     weight: float = 1.0
@@ -142,11 +150,74 @@ class RGBMixConfig(GalaxyProjectModel):
     blue: float = 0.0
 
 
+class NormalizationReferenceConfig(GalaxyProjectModel):
+    reference_id: str
+    kind: Literal["region"] = "region"
+    region_ids: list[str] = Field(min_length=1)
+    branch: Literal["original", "deconvolved"]
+    grid_id: str
+    source_ids: list[str] = Field(min_length=1)
+    unit: str | None = None
+    coverage_policy: Literal["available_contributors", "common_required_bands"]
+    tone_reference_policy: Literal["output_support", "common_required_bands"] = "output_support"
+    black_percentile: float = Field(ge=0, le=100)
+    white_percentile: float = Field(ge=0, le=100)
+    black_value: float
+    white_value: float
+    sample_count: int = Field(ge=1)
+    low_clipping_fraction: float = Field(ge=0, le=1)
+    high_clipping_fraction: float = Field(ge=0, le=1)
+    locked: Literal[True] = True
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> "NormalizationReferenceConfig":
+        if self.black_percentile >= self.white_percentile:
+            raise ValueError("reference black_percentile must be lower than white_percentile")
+        if not math.isfinite(self.black_value) or not math.isfinite(self.white_value):
+            raise ValueError("reference bounds must be finite")
+        if self.black_value >= self.white_value:
+            raise ValueError("reference black_value must be lower than white_value")
+        return self
+
+
+class PlaneNormalizationConfig(GalaxyProjectModel):
+    mode: Literal["native", "percentile", "fixed_bounds"] = "native"
+    black_percentile: float = Field(default=0.5, ge=0, le=100)
+    white_percentile: float = Field(default=99.5, ge=0, le=100)
+    black_value: float | None = None
+    white_value: float | None = None
+    reference: NormalizationReferenceConfig | None = None
+    stretch: Literal["linear", "asinh", "gamma"] = "asinh"
+    stretch_parameter: float = Field(default=4.0, gt=0)
+    gain: float = Field(default=1.0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_percentile_order(self) -> "PlaneNormalizationConfig":
+        if self.black_percentile >= self.white_percentile:
+            raise ValueError("normalization black_percentile must be lower than white_percentile")
+        if self.mode == "fixed_bounds":
+            if self.black_value is None or self.white_value is None:
+                raise ValueError("fixed_bounds normalization requires black_value and white_value")
+            if not math.isfinite(self.black_value) or not math.isfinite(self.white_value):
+                raise ValueError("normalization bounds must be finite")
+            if self.black_value >= self.white_value:
+                raise ValueError("normalization black_value must be lower than white_value")
+        if self.reference is not None:
+            if self.mode != "fixed_bounds":
+                raise ValueError("normalization reference requires fixed_bounds mode")
+            if (self.black_value, self.white_value) != (
+                self.reference.black_value, self.reference.white_value,
+            ):
+                raise ValueError("normalization bounds must match the locked reference")
+        return self
+
+
 class PlaneMappingConfig(GalaxyProjectModel):
     plane: str | None = None
     filter: str | None = None
     label: str | None = None
     rgb: RGBMixConfig = Field(default_factory=RGBMixConfig)
+    normalization: PlaneNormalizationConfig | None = None
 
     @model_validator(mode="after")
     def validate_selector(self) -> "PlaneMappingConfig":
@@ -174,6 +245,7 @@ class DerivedPlaneConfig(GalaxyProjectModel):
 
 class MappingDefaults(GalaxyProjectModel):
     strategy: Literal["continuum", "wavelength_order"] = "continuum"
+    normalization: PlaneNormalizationConfig = Field(default_factory=PlaneNormalizationConfig)
 
 
 class MappingConfig(GalaxyProjectModel):
@@ -183,8 +255,41 @@ class MappingConfig(GalaxyProjectModel):
 
 
 class StretchConfig(GalaxyProjectModel):
-    kind: Literal["asinh", "gamma"] = "asinh"
-    parameter: float = Field(gt=0)
+    kind: Literal["linear", "asinh", "gamma", "ghs"] = "asinh"
+    parameter: float | None = Field(default=None, gt=0)
+    stretch_factor: float | None = Field(default=None, ge=0, le=20)
+    local_intensity: float | None = Field(default=None, ge=-5, le=15)
+    symmetry_point: float | None = Field(default=None, ge=0, le=1)
+    shadow_protection: float | None = Field(default=None, ge=0, le=1)
+    highlight_protection: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_method_parameters(self) -> "StretchConfig":
+        ghs_fields = (
+            self.stretch_factor, self.local_intensity, self.symmetry_point,
+            self.shadow_protection, self.highlight_protection,
+        )
+        if self.kind in {"asinh", "gamma"} and self.parameter is None:
+            raise ValueError(f"{self.kind} stretch requires parameter")
+        if self.kind == "linear" and self.parameter is not None:
+            raise ValueError("linear stretch does not accept parameter")
+        if self.kind != "ghs" and any(value is not None for value in ghs_fields):
+            raise ValueError("GHS parameters require kind='ghs'")
+        if self.kind == "ghs":
+            if any(value is None for value in ghs_fields):
+                raise ValueError("ghs stretch requires all five GHS parameters")
+            assert self.shadow_protection is not None
+            assert self.symmetry_point is not None
+            assert self.highlight_protection is not None
+            if not (
+                self.shadow_protection <= self.symmetry_point
+                <= self.highlight_protection
+            ):
+                raise ValueError(
+                    "GHS parameters require shadow_protection <= symmetry_point "
+                    "<= highlight_protection"
+                )
+        return self
 
 
 class ToneStretchSet(GalaxyProjectModel):
@@ -210,12 +315,108 @@ class ToneGainBias(GalaxyProjectModel):
     blue: float = 1.0
 
 
+class AutoStretchResolutionConfig(GalaxyProjectModel):
+    algorithm_version: Literal["autostretch-shared-asinh-v1"] = "autostretch-shared-asinh-v1"
+    reference_id: str
+    branch: Literal["original", "deconvolved"]
+    grid_id: str
+    source_ids: list[str] = Field(min_length=1)
+    sample_count: int = Field(ge=256)
+    source_median: float = Field(gt=0, lt=0.1)
+    robust_spread: float = Field(gt=0)
+    object_fraction: float = Field(ge=0, le=0.25)
+    target_median: Literal[0.1] = 0.1
+    resolved_parameter: float = Field(gt=0)
+    low_clipping_fraction: float = Field(ge=0, le=1)
+    high_clipping_fraction: float = Field(ge=0, le=1)
+    confidence: Literal["high", "qualified"]
+    locked: Literal[True] = True
+
+
 class ToneConfig(GalaxyProjectModel):
     stretch: ToneStretchSet
     percentiles: TonePercentiles
     gain: ToneGainBias = Field(default_factory=ToneGainBias)
     bias: ToneGainBias = Field(default_factory=lambda: ToneGainBias(red=0.0, green=0.0, blue=0.0))
     saturation: float = Field(default=1.0, ge=0)
+    application: Literal["per_channel", "shared_intensity"] = "per_channel"
+    shared_stretch: StretchConfig | None = None
+    gamut_policy: Literal["clip", "rescale"] = "clip"
+    auto_stretch: AutoStretchResolutionConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_application(self) -> "ToneConfig":
+        if self.application == "shared_intensity" and self.shared_stretch is None:
+            raise ValueError("shared-intensity tone requires shared_stretch")
+        if self.application == "per_channel" and self.shared_stretch is not None:
+            raise ValueError("shared_stretch requires shared-intensity tone")
+        if self.auto_stretch is not None:
+            if self.application != "shared_intensity":
+                raise ValueError("auto_stretch requires shared-intensity tone")
+            if self.shared_stretch is None or self.shared_stretch.kind != "asinh":
+                raise ValueError("auto_stretch requires the resolved shared asinh stretch")
+            if self.shared_stretch.parameter != self.auto_stretch.resolved_parameter:
+                raise ValueError("auto_stretch resolved parameter does not match shared_stretch")
+        return self
+
+
+class SkyRectangleConfig(GalaxyProjectModel):
+    region_id: str
+    center_ra_deg: float = Field(ge=0, lt=360)
+    center_dec_deg: float = Field(ge=-90, le=90)
+    width_arcsec: float = Field(gt=0)
+    height_arcsec: float = Field(gt=0)
+
+
+class BackgroundEstimatorConfig(GalaxyProjectModel):
+    clip_sigma: float = Field(default=3.0, gt=0)
+    max_iterations: int = Field(default=5, ge=1, le=50)
+    minimum_samples: int = Field(default=256, ge=1)
+    minimum_valid_fraction: float = Field(default=0.5, gt=0, le=1)
+
+
+class ResolvedBackgroundPlaneConfig(GalaxyProjectModel):
+    selection_key: str
+    branch: Literal["original", "deconvolved"]
+    grid_id: str
+    source_ids: list[str]
+    unit: str | None = None
+    pedestal: float
+    geometric_sample_count: int = Field(ge=1)
+    common_valid_count: int = Field(ge=1)
+    common_valid_fraction: float = Field(gt=0, le=1)
+    sample_count: int = Field(ge=1)
+    rejected_count: int = Field(ge=0)
+    median: float
+    robust_spread: float = Field(ge=0)
+    residual_median: float
+
+
+class BackgroundConfig(GalaxyProjectModel):
+    mode: Literal["off", "pedestal"] = "off"
+    black_reference_policy: Literal["legacy_percentile", "corrected_zero"] = "legacy_percentile"
+    inclusion_regions: list[SkyRectangleConfig] = Field(default_factory=list)
+    exclusion_regions: list[SkyRectangleConfig] = Field(default_factory=list)
+    estimator: BackgroundEstimatorConfig = Field(default_factory=BackgroundEstimatorConfig)
+    resolved_branches: dict[str, dict[str, ResolvedBackgroundPlaneConfig]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "BackgroundConfig":
+        inclusion_ids = [region.region_id for region in self.inclusion_regions]
+        exclusion_ids = [region.region_id for region in self.exclusion_regions]
+        if len(inclusion_ids) != len(set(inclusion_ids)):
+            raise ValueError("background inclusion region IDs must be unique")
+        if len(exclusion_ids) != len(set(exclusion_ids)):
+            raise ValueError("background exclusion region IDs must be unique")
+        if set(inclusion_ids) & set(exclusion_ids):
+            raise ValueError("background inclusion and exclusion region IDs must be distinct")
+        if set(self.resolved_branches) - {"original", "deconvolved"}:
+            raise ValueError("background resolved branches must be original or deconvolved")
+        if self.mode == "off" and self.black_reference_policy != "legacy_percentile":
+            raise ValueError("background off mode requires legacy_percentile black reference")
+        if self.mode == "pedestal" and not self.inclusion_regions:
+            raise ValueError("background pedestal mode requires an inclusion region")
+        return self
 
 
 class PSFPlaneConfig(GalaxyProjectModel):
@@ -231,6 +432,10 @@ class PSFConfig(GalaxyProjectModel):
     per_plane: dict[str, PSFPlaneConfig] = Field(default_factory=dict)
 
 
+class BridgeConfig(GalaxyProjectModel):
+    enabled: StrictBool = True
+
+
 class ExecutionConfig(GalaxyProjectModel):
     fail_fast: bool = False
     log_file: str = "galaxy.log"
@@ -244,8 +449,11 @@ class GalaxyConfig(GalaxyProjectModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     canvas: CanvasConfig
     planes: PlanesConfig = Field(default_factory=PlanesConfig)
+    coverage: CoverageConfig = Field(default_factory=CoverageConfig)
     mapping: MappingConfig = Field(default_factory=MappingConfig)
     tone: ToneConfig
+    bridge: BridgeConfig = Field(default_factory=BridgeConfig)
+    background: BackgroundConfig = Field(default_factory=BackgroundConfig)
     psf: PSFConfig = Field(default_factory=PSFConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
 

@@ -7,9 +7,9 @@ from typing import Callable
 from uuid import uuid4
 
 from .pipeline import PipelineArtifacts, run_pipeline
-from .scene_card import append_render, load_scene, save_scene
+from .scene_card import append_render, edit_scene, load_scene, save_scene
 from .scene_execution import prepare_scene_execution
-from .scene_models import Asset, SceneCard
+from .scene_models import Asset, SceneCard, effective_inputs
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +20,8 @@ class ScenePipelineResult:
 
 def default_scene_workdir(card_path: str | Path, revision: int) -> Path:
     source = Path(card_path).resolve()
-    return source.parent / f"{source.stem}.assets" / f"render-r{revision}-{uuid4().hex[:12]}"
+    from .scene_workflow import associated_asset_root
+    return associated_asset_root(source) / f"render-r{revision}-{uuid4().hex[:12]}"
 
 
 def run_scene_pipeline(
@@ -55,7 +56,11 @@ def run_scene_pipeline(
     if cancel_requested is not None and cancel_requested():
         from .pipeline import PipelineCancelled
         raise PipelineCancelled("render cancelled before scene history commit")
-    updated = launch.card
+    render_card = (
+        edit_scene(launch.card, {"canvas": artifacts.effective_canvas})
+        if artifacts.effective_canvas is not None else launch.card
+    )
+    updated = render_card
     if mode not in ("full", "compose-only"):
         return ScenePipelineResult(updated, artifacts)
 
@@ -74,11 +79,18 @@ def run_scene_pipeline(
         footprint_id = None
 
     branches = [
-        ("original", artifacts.png_path, artifacts.tiff_path, artifacts.planes_path),
+        ("original", artifacts.png_path, artifacts.tiff_path, artifacts.planes_path,
+         artifacts.checkpoint_manifest_path, artifacts.background_diagnostics_path,
+         artifacts.background_overlay_path),
         ("deconvolved", artifacts.deconvolved_png_path, artifacts.deconvolved_tiff_path,
-         artifacts.deconvolved_planes_path),
+         artifacts.deconvolved_planes_path, artifacts.deconvolved_checkpoint_manifest_path,
+         artifacts.deconvolved_background_diagnostics_path,
+         artifacts.deconvolved_background_overlay_path),
     ]
-    for branch, image_path, tiff_path, planes_path in branches:
+    for (
+        branch, image_path, tiff_path, planes_path, checkpoint_path,
+        background_diagnostics_path, background_overlay_path,
+    ) in branches:
         if image_path is None:
             continue
         image_id = f"render-{uuid4()}"
@@ -90,7 +102,28 @@ def run_scene_pipeline(
             thumbnail_id: _local_asset("render_thumbnail", thumbnail_path, source),
         }
         if tiff_path is not None:
-            branch_assets[f"render-tiff-{uuid4()}"] = _local_asset("render_image", tiff_path, source)
+            high_depth_id = f"render-tiff-{uuid4()}"
+            branch_assets[high_depth_id] = _local_asset("render_image", tiff_path, source)
+        else:
+            high_depth_id = None
+        if checkpoint_path is not None:
+            checkpoint_id = f"checkpoint-{uuid4()}"
+            branch_assets[checkpoint_id] = _local_asset("checkpoint_manifest", checkpoint_path, source)
+        else:
+            checkpoint_id = None
+        background_ids: list[str] = []
+        if background_diagnostics_path is not None:
+            diagnostics_id = f"background-diagnostic-{uuid4()}"
+            background_ids.append(diagnostics_id)
+            branch_assets[diagnostics_id] = _local_asset(
+                "background_diagnostic", background_diagnostics_path, source
+            )
+        if background_overlay_path is not None:
+            overlay_id = f"background-overlay-{uuid4()}"
+            background_ids.append(overlay_id)
+            branch_assets[overlay_id] = _local_asset(
+                "background_region_overlay", background_overlay_path, source
+            )
         aligned_ids: list[str] = []
         if planes_path is not None:
             planes_id = f"planes-{uuid4()}"
@@ -98,30 +131,32 @@ def run_scene_pipeline(
             branch_assets[planes_id] = _local_asset("aligned_planes", planes_path, source)
         updated = append_render(
             updated,
-            snapshot=launch.card,
+            snapshot=render_card,
             branch=branch,
             plane_filters=plane_filters,
             image_asset_id=image_id,
             provenance_asset_id=provenance_id,
             assets=branch_assets,
             thumbnail_asset_id=thumbnail_id,
+            high_depth_image_asset_id=high_depth_id,
+            checkpoint_manifest_asset_id=checkpoint_id,
+            background_diagnostic_asset_ids=background_ids,
+            aligned_plane_asset_ids=aligned_ids,
+            footprint_asset_id=footprint_id,
             now=None,
         )
-        record = updated.renders[-1]
-        if aligned_ids or footprint_id:
-            data = updated.model_dump(mode="json", exclude_unset=True)
-            if aligned_ids:
-                data["renders"][-1]["aligned_plane_asset_ids"] = aligned_ids
-            if footprint_id:
-                data["renders"][-1]["footprint_asset_id"] = footprint_id
-            updated = SceneCard.model_validate(data)
-    latest = load_scene(source)
+    latest_on_disk = load_scene(source)
+    latest = latest_on_disk
+    if artifacts.effective_canvas is not None:
+        if effective_inputs(latest) != effective_inputs(launch.card):
+            raise ValueError("scene inputs changed while the automatic footprint frame was rendering")
+        latest = edit_scene(latest, {"canvas": artifacts.effective_canvas})
     from .scene_workflow import merge_render_completion
     merged = merge_render_completion(latest, updated)
     if cancel_requested is not None and cancel_requested():
         from .pipeline import PipelineCancelled
         raise PipelineCancelled("render cancelled before scene history commit")
-    committed = save_scene(merged, source, expected_previous=latest)
+    committed = save_scene(merged, source, expected_previous=latest_on_disk)
     return ScenePipelineResult(committed, artifacts)
 
 

@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from galaxy.discovery_cache import (
-    candidate_cache_path, load_cached_candidates, save_cached_candidates,
+    candidate_cache_directory, candidate_cache_path, load_cached_candidates,
+    save_cached_candidates,
 )
 from galaxy.scene_workflow import draft_from_target
 from galaxy.selection import CandidateManifest, CandidateRecord
@@ -28,6 +29,12 @@ def _card():
     return draft_from_target(
         name="M1", ra_deg=83.633, dec_deg=22.014,
         width_arcmin=2.0, height_arcmin=2.0,
+    )
+
+
+def test_candidate_cache_directory_uses_application_cache_domain(tmp_path) -> None:
+    assert candidate_cache_directory(tmp_path) == (
+        tmp_path.resolve() / ".galaxy-cache" / "candidates"
     )
 
 

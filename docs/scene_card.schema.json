@@ -14,7 +14,10 @@
             "footprint",
             "candidate_manifest",
             "provenance",
-            "psf_kernel"
+            "psf_kernel",
+            "checkpoint_manifest",
+            "background_diagnostic",
+            "background_region_overlay"
           ],
           "title": "Kind",
           "type": "string"
@@ -60,6 +63,213 @@
       "title": "Asset",
       "type": "object"
     },
+    "AutoStretchResolution": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm_version": {
+          "const": "autostretch-shared-asinh-v1",
+          "title": "Algorithm Version",
+          "type": "string"
+        },
+        "reference_id": {
+          "pattern": ".*\\S.*",
+          "title": "Reference Id",
+          "type": "string"
+        },
+        "branch": {
+          "enum": [
+            "original",
+            "deconvolved"
+          ],
+          "title": "Branch",
+          "type": "string"
+        },
+        "grid_id": {
+          "pattern": ".*\\S.*",
+          "title": "Grid Id",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "sample_count": {
+          "minimum": 256,
+          "title": "Sample Count",
+          "type": "integer"
+        },
+        "source_median": {
+          "exclusiveMaximum": 0.1,
+          "exclusiveMinimum": 0,
+          "title": "Source Median",
+          "type": "number"
+        },
+        "robust_spread": {
+          "exclusiveMinimum": 0,
+          "title": "Robust Spread",
+          "type": "number"
+        },
+        "object_fraction": {
+          "maximum": 0.25,
+          "minimum": 0,
+          "title": "Object Fraction",
+          "type": "number"
+        },
+        "target_median": {
+          "const": 0.1,
+          "title": "Target Median",
+          "type": "number"
+        },
+        "resolved_parameter": {
+          "exclusiveMinimum": 0,
+          "title": "Resolved Parameter",
+          "type": "number"
+        },
+        "low_clipping_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Low Clipping Fraction",
+          "type": "number"
+        },
+        "high_clipping_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "High Clipping Fraction",
+          "type": "number"
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "qualified"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "locked": {
+          "const": true,
+          "title": "Locked",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "algorithm_version",
+        "reference_id",
+        "branch",
+        "grid_id",
+        "source_ids",
+        "sample_count",
+        "source_median",
+        "robust_spread",
+        "object_fraction",
+        "target_median",
+        "resolved_parameter",
+        "low_clipping_fraction",
+        "high_clipping_fraction",
+        "confidence",
+        "locked"
+      ],
+      "title": "AutoStretchResolution",
+      "type": "object"
+    },
+    "Background": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "off",
+            "pedestal"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "black_reference_policy": {
+          "enum": [
+            "legacy_percentile",
+            "corrected_zero"
+          ],
+          "title": "Black Reference Policy",
+          "type": "string"
+        },
+        "inclusion_regions": {
+          "items": {
+            "$ref": "#/$defs/SkyRectangle"
+          },
+          "title": "Inclusion Regions",
+          "type": "array"
+        },
+        "exclusion_regions": {
+          "items": {
+            "$ref": "#/$defs/SkyRectangle"
+          },
+          "title": "Exclusion Regions",
+          "type": "array"
+        },
+        "estimator": {
+          "$ref": "#/$defs/BackgroundEstimator"
+        },
+        "resolved_branches": {
+          "patternProperties": {
+            ".*\\S.*": {
+              "patternProperties": {
+                ".*\\S.*": {
+                  "$ref": "#/$defs/ResolvedBackgroundPlane"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "title": "Resolved Branches",
+          "type": "object"
+        }
+      },
+      "title": "Background",
+      "type": "object"
+    },
+    "BackgroundEstimator": {
+      "additionalProperties": false,
+      "properties": {
+        "clip_sigma": {
+          "exclusiveMinimum": 0,
+          "title": "Clip Sigma",
+          "type": "number"
+        },
+        "max_iterations": {
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Max Iterations",
+          "type": "integer"
+        },
+        "minimum_samples": {
+          "exclusiveMinimum": 0,
+          "title": "Minimum Samples",
+          "type": "integer"
+        },
+        "minimum_valid_fraction": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Minimum Valid Fraction",
+          "type": "number"
+        }
+      },
+      "title": "BackgroundEstimator",
+      "type": "object"
+    },
+    "Bridge": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "Bridge",
+      "type": "object"
+    },
     "Canvas": {
       "additionalProperties": false,
       "properties": {
@@ -95,6 +305,15 @@
         "flux_conserving": {
           "title": "Flux Conserving",
           "type": "boolean"
+        },
+        "frame_origin": {
+          "enum": [
+            "search_region",
+            "selected_footprints",
+            "user"
+          ],
+          "title": "Frame Origin",
+          "type": "string"
         },
         "view_state": {
           "$ref": "#/$defs/ViewState"
@@ -150,9 +369,48 @@
         },
         "rgb": {
           "$ref": "#/$defs/RGB"
+        },
+        "normalization": {
+          "$ref": "#/$defs/PlaneNormalization"
         }
       },
       "title": "Contribution",
+      "type": "object"
+    },
+    "Coverage": {
+      "additionalProperties": false,
+      "properties": {
+        "policy": {
+          "enum": [
+            "available_contributors",
+            "common_required_bands"
+          ],
+          "title": "Policy",
+          "type": "string"
+        },
+        "tone_reference": {
+          "enum": [
+            "output_support",
+            "common_required_bands"
+          ],
+          "title": "Tone Reference",
+          "type": "string"
+        },
+        "crop": {
+          "enum": [
+            "none",
+            "bounding_box"
+          ],
+          "title": "Crop",
+          "type": "string"
+        },
+        "padding_pixels": {
+          "minimum": 0,
+          "title": "Padding Pixels",
+          "type": "integer"
+        }
+      },
+      "title": "Coverage",
       "type": "object"
     },
     "DerivedPlane": {
@@ -318,11 +576,20 @@
         "planes": {
           "$ref": "#/$defs/Planes"
         },
+        "coverage": {
+          "$ref": "#/$defs/Coverage"
+        },
         "mapping": {
           "$ref": "#/$defs/Mapping"
         },
         "tone": {
           "$ref": "#/$defs/Tone"
+        },
+        "bridge": {
+          "$ref": "#/$defs/Bridge"
+        },
+        "background": {
+          "$ref": "#/$defs/Background"
         },
         "psf": {
           "$ref": "#/$defs/PSF"
@@ -374,9 +641,138 @@
           ],
           "title": "Strategy",
           "type": "string"
+        },
+        "normalization": {
+          "$ref": "#/$defs/PlaneNormalization"
         }
       },
       "title": "MappingDefaults",
+      "type": "object"
+    },
+    "NormalizationReference": {
+      "additionalProperties": false,
+      "properties": {
+        "reference_id": {
+          "pattern": ".*\\S.*",
+          "title": "Reference Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "region",
+          "title": "Kind",
+          "type": "string"
+        },
+        "region_ids": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Region Ids",
+          "type": "array"
+        },
+        "branch": {
+          "enum": [
+            "original",
+            "deconvolved"
+          ],
+          "title": "Branch",
+          "type": "string"
+        },
+        "grid_id": {
+          "pattern": ".*\\S.*",
+          "title": "Grid Id",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "unit": {
+          "pattern": ".*\\S.*",
+          "title": "Unit",
+          "type": "string"
+        },
+        "coverage_policy": {
+          "enum": [
+            "available_contributors",
+            "common_required_bands"
+          ],
+          "title": "Coverage Policy",
+          "type": "string"
+        },
+        "tone_reference_policy": {
+          "enum": [
+            "output_support",
+            "common_required_bands"
+          ],
+          "title": "Tone Reference Policy",
+          "type": "string"
+        },
+        "black_percentile": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Black Percentile",
+          "type": "number"
+        },
+        "white_percentile": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "White Percentile",
+          "type": "number"
+        },
+        "black_value": {
+          "title": "Black Value",
+          "type": "number"
+        },
+        "white_value": {
+          "title": "White Value",
+          "type": "number"
+        },
+        "sample_count": {
+          "exclusiveMinimum": 0,
+          "title": "Sample Count",
+          "type": "integer"
+        },
+        "low_clipping_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Low Clipping Fraction",
+          "type": "number"
+        },
+        "high_clipping_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "High Clipping Fraction",
+          "type": "number"
+        },
+        "locked": {
+          "const": true,
+          "title": "Locked",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reference_id",
+        "kind",
+        "region_ids",
+        "branch",
+        "grid_id",
+        "source_ids",
+        "coverage_policy",
+        "black_percentile",
+        "white_percentile",
+        "black_value",
+        "white_value",
+        "sample_count",
+        "low_clipping_fraction",
+        "high_clipping_fraction",
+        "locked"
+      ],
+      "title": "NormalizationReference",
       "type": "object"
     },
     "Output": {
@@ -468,6 +864,64 @@
         }
       },
       "title": "Percentiles",
+      "type": "object"
+    },
+    "PlaneNormalization": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "native",
+            "percentile",
+            "fixed_bounds"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "black_percentile": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Black Percentile",
+          "type": "number"
+        },
+        "white_percentile": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "White Percentile",
+          "type": "number"
+        },
+        "black_value": {
+          "title": "Black Value",
+          "type": "number"
+        },
+        "white_value": {
+          "title": "White Value",
+          "type": "number"
+        },
+        "reference": {
+          "$ref": "#/$defs/NormalizationReference"
+        },
+        "stretch": {
+          "enum": [
+            "linear",
+            "asinh",
+            "gamma"
+          ],
+          "title": "Stretch",
+          "type": "string"
+        },
+        "stretch_parameter": {
+          "exclusiveMinimum": 0,
+          "title": "Stretch Parameter",
+          "type": "number"
+        },
+        "gain": {
+          "minimum": 0,
+          "title": "Gain",
+          "type": "number"
+        }
+      },
+      "title": "PlaneNormalization",
       "type": "object"
     },
     "Planes": {
@@ -657,6 +1111,11 @@
           "title": "Image Asset Id",
           "type": "string"
         },
+        "high_depth_image_asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "High Depth Image Asset Id",
+          "type": "string"
+        },
         "inputs": {
           "$ref": "#/$defs/Inputs"
         },
@@ -682,6 +1141,19 @@
           "pattern": ".*\\S.*",
           "title": "Footprint Asset Id",
           "type": "string"
+        },
+        "checkpoint_manifest_asset_id": {
+          "pattern": ".*\\S.*",
+          "title": "Checkpoint Manifest Asset Id",
+          "type": "string"
+        },
+        "background_diagnostic_asset_ids": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Background Diagnostic Asset Ids",
+          "type": "array"
         }
       },
       "required": [
@@ -694,6 +1166,102 @@
         "provenance_asset_id"
       ],
       "title": "Render",
+      "type": "object"
+    },
+    "ResolvedBackgroundPlane": {
+      "additionalProperties": false,
+      "properties": {
+        "selection_key": {
+          "pattern": ".*\\S.*",
+          "title": "Selection Key",
+          "type": "string"
+        },
+        "branch": {
+          "enum": [
+            "original",
+            "deconvolved"
+          ],
+          "title": "Branch",
+          "type": "string"
+        },
+        "grid_id": {
+          "pattern": ".*\\S.*",
+          "title": "Grid Id",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "unit": {
+          "pattern": ".*\\S.*",
+          "title": "Unit",
+          "type": "string"
+        },
+        "pedestal": {
+          "title": "Pedestal",
+          "type": "number"
+        },
+        "geometric_sample_count": {
+          "exclusiveMinimum": 0,
+          "title": "Geometric Sample Count",
+          "type": "integer"
+        },
+        "common_valid_count": {
+          "exclusiveMinimum": 0,
+          "title": "Common Valid Count",
+          "type": "integer"
+        },
+        "common_valid_fraction": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Common Valid Fraction",
+          "type": "number"
+        },
+        "sample_count": {
+          "exclusiveMinimum": 0,
+          "title": "Sample Count",
+          "type": "integer"
+        },
+        "rejected_count": {
+          "minimum": 0,
+          "title": "Rejected Count",
+          "type": "integer"
+        },
+        "median": {
+          "title": "Median",
+          "type": "number"
+        },
+        "robust_spread": {
+          "minimum": 0,
+          "title": "Robust Spread",
+          "type": "number"
+        },
+        "residual_median": {
+          "title": "Residual Median",
+          "type": "number"
+        }
+      },
+      "required": [
+        "selection_key",
+        "branch",
+        "grid_id",
+        "source_ids",
+        "pedestal",
+        "geometric_sample_count",
+        "common_valid_count",
+        "common_valid_fraction",
+        "sample_count",
+        "rejected_count",
+        "median",
+        "robust_spread",
+        "residual_median"
+      ],
+      "title": "ResolvedBackgroundPlane",
       "type": "object"
     },
     "Search": {
@@ -802,6 +1370,47 @@
       "title": "Selection",
       "type": "object"
     },
+    "SkyRectangle": {
+      "additionalProperties": false,
+      "properties": {
+        "region_id": {
+          "pattern": ".*\\S.*",
+          "title": "Region Id",
+          "type": "string"
+        },
+        "center_ra_deg": {
+          "exclusiveMaximum": 360,
+          "minimum": 0,
+          "title": "Center Ra Deg",
+          "type": "number"
+        },
+        "center_dec_deg": {
+          "maximum": 90,
+          "minimum": -90,
+          "title": "Center Dec Deg",
+          "type": "number"
+        },
+        "width_arcsec": {
+          "exclusiveMinimum": 0,
+          "title": "Width Arcsec",
+          "type": "number"
+        },
+        "height_arcsec": {
+          "exclusiveMinimum": 0,
+          "title": "Height Arcsec",
+          "type": "number"
+        }
+      },
+      "required": [
+        "region_id",
+        "center_ra_deg",
+        "center_dec_deg",
+        "width_arcsec",
+        "height_arcsec"
+      ],
+      "title": "SkyRectangle",
+      "type": "object"
+    },
     "Source": {
       "additionalProperties": false,
       "properties": {
@@ -845,8 +1454,10 @@
       "properties": {
         "kind": {
           "enum": [
+            "linear",
             "asinh",
-            "gamma"
+            "gamma",
+            "ghs"
           ],
           "title": "Kind",
           "type": "string"
@@ -854,6 +1465,36 @@
         "parameter": {
           "exclusiveMinimum": 0,
           "title": "Parameter",
+          "type": "number"
+        },
+        "stretch_factor": {
+          "maximum": 20,
+          "minimum": 0,
+          "title": "Stretch Factor",
+          "type": "number"
+        },
+        "local_intensity": {
+          "maximum": 15,
+          "minimum": -5,
+          "title": "Local Intensity",
+          "type": "number"
+        },
+        "symmetry_point": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Symmetry Point",
+          "type": "number"
+        },
+        "shadow_protection": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Shadow Protection",
+          "type": "number"
+        },
+        "highlight_protection": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Highlight Protection",
           "type": "number"
         }
       },
@@ -962,6 +1603,28 @@
           "minimum": 0,
           "title": "Saturation",
           "type": "number"
+        },
+        "application": {
+          "enum": [
+            "per_channel",
+            "shared_intensity"
+          ],
+          "title": "Application",
+          "type": "string"
+        },
+        "shared_stretch": {
+          "$ref": "#/$defs/Stretch"
+        },
+        "gamut_policy": {
+          "enum": [
+            "clip",
+            "rescale"
+          ],
+          "title": "Gamut Policy",
+          "type": "string"
+        },
+        "auto_stretch": {
+          "$ref": "#/$defs/AutoStretchResolution"
         }
       },
       "title": "Tone",
@@ -1047,11 +1710,20 @@
     "planes": {
       "$ref": "#/$defs/Planes"
     },
+    "coverage": {
+      "$ref": "#/$defs/Coverage"
+    },
     "mapping": {
       "$ref": "#/$defs/Mapping"
     },
     "tone": {
       "$ref": "#/$defs/Tone"
+    },
+    "bridge": {
+      "$ref": "#/$defs/Bridge"
+    },
+    "background": {
+      "$ref": "#/$defs/Background"
     },
     "psf": {
       "$ref": "#/$defs/PSF"

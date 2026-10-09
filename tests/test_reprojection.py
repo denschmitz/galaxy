@@ -62,6 +62,23 @@ def test_flux_conserving_reprojection_returns_finite_output() -> None:
     assert np.isfinite(reprojected.footprint).all()
 
 
+def test_invalid_source_pixel_does_not_contribute_reprojection_coverage() -> None:
+    wcs = WCS(naxis=2)
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.crval = [10.0, 20.0]
+    wcs.wcs.crpix = [3.0, 3.0]
+    wcs.wcs.cdelt = [-0.0002777778, 0.0002777778]
+    image = np.ones((6, 6), dtype=np.float32)
+    mask = np.zeros((6, 6), dtype=bool)
+    mask[2:4, 2:4] = True
+    plane = FITSPlane("masked", image, wcs, {"filter": "F200W"}, mask=mask)
+
+    result = reproject_plane(plane, wcs, image.shape, flux_conserving=False)
+
+    assert np.count_nonzero(result.footprint == 0) >= np.count_nonzero(mask)
+    assert result.metadata["valid_coverage_fraction"] < 1.0
+
+
 def test_reference_workspace_uses_first_plane_orientation_and_expands_union() -> None:
     ref_wcs = WCS(naxis=2)
     ref_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]

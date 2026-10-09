@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import logging
+import math
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -13,7 +14,9 @@ from astroquery.mast import Observations
 from galaxy.cache import sha256_file
 from galaxy.processing_config import SearchConfig
 from galaxy.logging_utils import emit_log
-from galaxy.selection import CandidateManifest, CandidateRecord, SelectionInputs
+from galaxy.selection import (
+    CandidateManifest, CandidateRecord, SelectionInputs, consolidate_candidates,
+)
 
 
 PRODUCT_TYPE_PRIORITY = {
@@ -100,13 +103,14 @@ def build_candidate_manifest(
     selection_inputs: SelectionInputs | None = None,
 ) -> CandidateManifest:
     inputs = selection_inputs or SelectionInputs()
-    updated = apply_selection_policy(candidates, search, inputs)
+    updated = apply_selection_policy(consolidate_candidates(candidates), search, inputs)
     return CandidateManifest(
         generated_at=_utc_now(),
         config_path=config_path,
         selection_policy=inputs.strategy or search.observation_selection,
         max_observations_per_filter=inputs.max_per_filter or search.max_observations_per_filter,
         selection_inputs=inputs,
+        selection_mode=("custom" if (inputs.strategy or search.observation_selection) == "all" else "one_per_filter"),
         candidates=updated,
     )
 
@@ -143,6 +147,8 @@ def filter_products(products: list[dict[str, Any]], search: SearchConfig) -> lis
 def build_candidates(products: list[dict[str, Any]]) -> list[CandidateRecord]:
     candidates: list[CandidateRecord] = []
     for product in products:
+        if not str(product.get("dataURI") or stable_product_identifier(product)).strip():
+            raise ValueError("MAST product row lacks an authoritative downloadable identity")
         rank = rank_product(product)
         candidates.append(
             CandidateRecord(
@@ -174,7 +180,7 @@ def build_candidates(products: list[dict[str, Any]]) -> list[CandidateRecord]:
                 },
             )
         )
-    return sorted(candidates, key=_candidate_sort_key)
+    return sorted(consolidate_candidates(candidates), key=_candidate_sort_key)
 
 
 def select_products(products: list[dict[str, Any]], search: SearchConfig | None = None) -> list[dict[str, Any]]:
@@ -214,7 +220,7 @@ def apply_selection_policy(
             candidate.auto_selected = True
             candidate.auto_selection_reason = auto_reasons[candidate.candidate_id]
         elif candidate.candidate_id in best_ids and candidate.auto_selection_reason == "dropped:not_auto_selected":
-            candidate.auto_selection_reason = _dropped_reason_for_strategy(strategy)
+            candidate.auto_selection_reason = _dropped_reason_for_strategy(strategy, candidate)
 
     narrowed = sorted(
         [candidate for candidate in updated if candidate.auto_selected and _matches_narrowing_filters(candidate, inputs)],
@@ -395,15 +401,13 @@ def stable_product_identifier(product: dict[str, Any]) -> str:
 
 
 def _candidate_id(product: dict[str, Any]) -> str:
-    raw = "|".join(
-        [
-            str(product.get("obsid") or ""),
-            str(product.get("obs_id") or product.get("obsID") or ""),
-            str(product.get("filters") or product.get("filter") or ""),
-            stable_product_identifier(product),
-        ]
-    )
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    uri = str(product.get("dataURI") or "").strip().casefold()
+    if uri:
+        identity = f"uri:{uri}"
+    else:
+        archive = str(product.get("_obs_collection") or product.get("obs_collection") or "MAST")
+        identity = f"product:{archive.strip().casefold()}:{stable_product_identifier(product)}"
+    return hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
 
 
 def _version_rank(product: dict[str, Any]) -> tuple[int, ...]:
@@ -429,6 +433,9 @@ def _build_observation_metadata(observations: list[dict[str, Any]]) -> dict[str,
             "_obs_exptime": row.get("t_exptime") or row.get("exptime") or row.get("exposure_time"),
             "_obs_collection": row.get("obs_collection"),
             "_obs_instrument": row.get("instrument_name"),
+            "_obs_s_region": row.get("s_region"),
+            "_obs_s_ra": row.get("s_ra"),
+            "_obs_s_dec": row.get("s_dec"),
             "proposal_id": row.get("proposal_id") or row.get("proposal_pi"),
             "proposal_title": row.get("obs_title"),
             "target_name": row.get("target_name"),
@@ -440,7 +447,8 @@ def _enrich_products(products: list[dict[str, Any]], observation_metadata: dict[
     enriched: list[dict[str, Any]] = []
     for product in products:
         merged = dict(product)
-        metadata = observation_metadata.get(str(product.get("obsid") or ""), {})
+        parent_obsid = product.get("parent_obsid") or product.get("obsid") or product.get("obsID")
+        metadata = observation_metadata.get(str(parent_obsid or ""), {})
         merged.update(metadata)
         enriched.append(merged)
     return enriched
@@ -450,11 +458,11 @@ def _best_candidates_per_observation_filter(candidates: list[CandidateRecord]) -
     grouped: dict[tuple[str, str], list[CandidateRecord]] = {}
     for candidate in candidates:
         key = (
-            str(candidate.obs_id or candidate.obsid or candidate.candidate_id),
+            _parent_observation_id(candidate),
             str(candidate.filter_name or "").upper(),
         )
         grouped.setdefault(key, []).append(candidate)
-    return [sorted(grouped[key], key=_candidate_sort_key)[0] for key in sorted(grouped)]
+    return [sorted(grouped[key], key=_within_observation_product_rank)[0] for key in sorted(grouped)]
 
 
 def _auto_select_candidates(candidates: list[CandidateRecord], strategy: str, max_per_filter: int) -> list[CandidateRecord]:
@@ -464,9 +472,13 @@ def _auto_select_candidates(candidates: list[CandidateRecord], strategy: str, ma
             candidate.auto_selection_reason = "selected:all"
         return sorted(selected, key=_candidate_sort_key)
 
-    grouped: dict[str, list[CandidateRecord]] = {}
+    grouped: dict[tuple[str, str, str], list[CandidateRecord]] = {}
     for candidate in candidates:
-        key = str(candidate.filter_name or candidate.candidate_id).upper()
+        key = (
+            str(candidate.mission or "unknown").upper(),
+            str(candidate.instrument or "unknown").upper(),
+            str(candidate.filter_name or candidate.candidate_id).upper(),
+        )
         grouped.setdefault(key, []).append(candidate)
 
     selected: list[CandidateRecord] = []
@@ -480,13 +492,14 @@ def _auto_select_candidates(candidates: list[CandidateRecord], strategy: str, ma
     return sorted(selected, key=_candidate_sort_key)
 
 
-def _observation_rank(candidate: CandidateRecord, strategy: str) -> tuple[float, float, tuple[int, ...], tuple[Any, ...]]:
+def _observation_rank(candidate: CandidateRecord, strategy: str) -> tuple[Any, ...]:
     end_date = _safe_float(candidate.observation_date_end, default=0.0)
-    exposure = float(candidate.exposure_time or 0.0)
+    exposure_known = _known_exposure(candidate)
+    exposure = float(candidate.exposure_time) if exposure_known else 0.0
     rank = tuple(candidate.selection_rank[2]) if len(candidate.selection_rank) > 2 else (0,)
     selection_rank = _selection_rank_key(candidate)
     if strategy == "deepest_per_filter":
-        return (-exposure, -end_date, rank, selection_rank)
+        return (0 if exposure_known else 1, -exposure, -end_date, rank, selection_rank)
     return (-end_date, -exposure, rank, selection_rank)
 
 
@@ -520,12 +533,46 @@ def _matches_explicit_exclude(candidate: CandidateRecord, inputs: SelectionInput
     return bool(candidate.identity_tokens & inputs.exclude_products)
 
 
-def _dropped_reason_for_strategy(strategy: str) -> str:
+def _dropped_reason_for_strategy(strategy: str, candidate: CandidateRecord) -> str:
     if strategy == "deepest_per_filter":
+        if not _known_exposure(candidate):
+            return "dropped:unknown_depth_not_selected"
         return "dropped:shallower_than_peer"
     if strategy == "latest_per_filter":
         return "dropped:older_than_peer"
     return f"dropped:{strategy}"
+
+
+def _known_exposure(candidate: CandidateRecord) -> bool:
+    if candidate.exposure_time is None:
+        return False
+    try:
+        return math.isfinite(float(candidate.exposure_time))
+    except (TypeError, ValueError):
+        return False
+
+
+def _parent_observation_id(candidate: CandidateRecord) -> str:
+    raw_product = candidate.extra_metadata.get("raw_product", {})
+    if isinstance(raw_product, dict):
+        parent_obsid = raw_product.get("parent_obsid") or raw_product.get("obsid")
+        if parent_obsid:
+            return str(parent_obsid)
+    return str(candidate.obsid or candidate.obs_id or candidate.candidate_id)
+
+
+def _within_observation_product_rank(candidate: CandidateRecord) -> tuple[Any, ...]:
+    raw_product = candidate.extra_metadata.get("raw_product", {})
+    calibration_level = None
+    if isinstance(raw_product, dict):
+        try:
+            calibration_level = int(raw_product.get("calib_level"))
+        except (TypeError, ValueError):
+            calibration_level = None
+    filename = str(candidate.product_filename or "").lower()
+    is_jwst_association = bool(re.match(r"^jw\d+-o\d+_t\d+_.*_i2d\.fits(?:\.gz)?$", filename))
+    is_combined_image = is_jwst_association or (calibration_level is not None and calibration_level >= 3)
+    return (0 if is_combined_image else 1, _candidate_sort_key(candidate))
 
 
 def _candidate_sort_key(candidate: CandidateRecord) -> tuple[Any, ...]:

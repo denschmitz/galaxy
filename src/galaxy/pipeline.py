@@ -1,20 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import logging
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.wcs import WCS
 
 from galaxy.cache import ensure_directory, write_manifest
+from galaxy.artifact_paths import branch_artifact_paths, existing_branch_artifact_paths
+from galaxy.background import (
+    BackgroundProposal,
+    background_masks,
+    write_background_diagnostics,
+    write_background_overlay,
+)
+from galaxy.checkpoints import (
+    build_producer_inputs,
+    checkpoint_stage_record,
+    load_validated_checkpoint,
+    read_checkpoint_manifest,
+    write_checkpoint_manifest,
+)
 from galaxy.processing_config import GalaxyConfig
 from galaxy.export import export_footprint_overlay, export_png, export_tiff
+from galaxy.bridge import NativePresentation, prepare_native_presentation
 from galaxy.fitsio import FITSPlane, load_fits_plane
 from galaxy.logging_utils import configure_logging, emit_log
-from galaxy.mapping import CompositionInputs, compose_channels
 from galaxy.mast import build_candidate_manifest, discover_candidates, download_selected, selection_summary
 from galaxy.planes import build_plane_records, export_multiplane_fits, load_multiplane_records
 from galaxy.provenance import build_provenance, write_provenance
@@ -30,11 +46,12 @@ from galaxy.reprojection import (
     reproject_all,
     save_reprojected_plane,
 )
+from galaxy.rendering import render_aligned_planes
 from galaxy.selection import CandidateManifest, SelectionInputs, write_candidate_manifest
 from galaxy.scene_models import SceneCard
 from galaxy.scene_readiness import readiness
 from galaxy.targeting import ResolvedTarget, region_to_mast_shape, resolve_target
-from galaxy.tone import apply_tone
+from galaxy.viewport_framing import fit_planes
 
 
 logger = logging.getLogger(__name__)
@@ -55,14 +72,21 @@ class PipelineArtifacts:
     manifest_path: Path
     planes_path: Path | None
     deconvolved_planes_path: Path | None
+    checkpoint_manifest_path: Path | None
+    deconvolved_checkpoint_manifest_path: Path | None
     footprint_overlay_path: Path | None
     png_path: Path | None
     deconvolved_png_path: Path | None
     tiff_path: Path | None
     deconvolved_tiff_path: Path | None
+    background_diagnostics_path: Path | None
+    deconvolved_background_diagnostics_path: Path | None
+    background_overlay_path: Path | None
+    deconvolved_background_overlay_path: Path | None
     provenance_path: Path
     config_path: Path
     inspected_plane_filters: dict[str, str]
+    effective_canvas: dict[str, object] | None
 
 
 @dataclass(slots=True)
@@ -94,7 +118,7 @@ def run_pipeline(
         debug_to_file=config.execution.debug_to_file,
     )
     cache_dir = ensure_directory(output_dir / "cache")
-    reprojected_dir = ensure_directory(output_dir / "reprojected")
+    reprojected_dir = output_dir
 
     emit_log(logger, logging.INFO, f"Pipeline start: mode={mode} workdir={output_dir}", progress)
     _cancellation_checkpoint(cancel_requested, "target resolution")
@@ -120,6 +144,8 @@ def run_pipeline(
     manifest: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
     cached_paths: list[Path] = sorted(cache_dir.glob("*.fits*"))
+    if mode == "compose-only" and local_product_paths:
+        cached_paths = sorted(Path(path) for path in local_product_paths.values())
 
     if mode in {"full", "download-only", "reproject-only"}:
         _cancellation_checkpoint(cancel_requested, "discovery and download")
@@ -212,6 +238,8 @@ def run_pipeline(
         logger.error("Pipeline cannot continue without target coordinates for reprojection")
         raise RuntimeError("reprojection and composition require a target-defined scene")
 
+    source_ids_by_path = _source_ids_by_path(manifest, local_product_paths or {})
+
     _cancellation_checkpoint(cancel_requested, "reprojection")
     reprojected_result = _load_or_build_reprojected(
         config,
@@ -223,6 +251,7 @@ def run_pipeline(
         mode,
         progress,
         scene_card=scene_card,
+        source_ids_by_path=source_ids_by_path,
     )
     original_reprojected = reprojected_result.original_planes
     deconvolved_reprojected = reprojected_result.deconvolved_planes
@@ -244,23 +273,90 @@ def run_pipeline(
             f"First failure: {diagnostics['first_failure'] or 'none recorded'}"
         )
 
-    original_records, original_planes_path = _export_branch_planes(
-        original_reprojected,
-        config,
-        output_dir / "exported_planes.fits",
-        output_wcs=reprojected_result.output_wcs,
-        artifact_branch="original",
+    _validate_selected_plane_coverage(original_reprojected)
+
+    original_records = build_plane_records(
+        original_reprojected, set(config.planes.disabled_plane_ids), artifact_branch="original"
     )
+    original_paths = (
+        existing_branch_artifact_paths(output_dir, "original")
+        if mode == "compose-only" else branch_artifact_paths(output_dir, "original")
+    )
+    if original_paths is None:
+        raise RuntimeError(
+            "compose-only requires an aligned checkpoint; run full or reprojection-only processing"
+        )
+    original_planes_path: Path | None = original_paths.aligned_planes
+    original_checkpoint_path: Path | None = original_paths.checkpoint_manifest
+    if mode != "compose-only":
+        original_records, original_planes_path = _export_branch_planes(
+            original_reprojected,
+            config,
+            original_planes_path,
+            output_wcs=reprojected_result.output_wcs,
+            artifact_branch="original",
+        )
+        original_checkpoint_path = None
+    if mode != "compose-only" and original_planes_path is not None:
+        _cancellation_checkpoint(cancel_requested, "original checkpoint publication")
+        original_checkpoint_path = write_checkpoint_manifest(
+            original_reprojected,
+            original_planes_path,
+            build_producer_inputs(
+                config,
+                cached_paths,
+                "original",
+                resolved_center_deg=(float(resolved_center.ra.deg), float(resolved_center.dec.deg)),
+                source_ids_by_path=source_ids_by_path,
+            ),
+            "original",
+            destination=original_paths.checkpoint_manifest,
+            resolved_settings=_reprojection_settings(reprojected_result.diagnostics),
+        )
     deconvolved_records: list = []
     deconvolved_planes_path: Path | None = None
+    deconvolved_checkpoint_path: Path | None = None
     if deconvolved_reprojected:
-        deconvolved_records, deconvolved_planes_path = _export_branch_planes(
+        deconvolved_records = build_plane_records(
             deconvolved_reprojected,
-            config,
-            output_dir / "exported_planes_deconvolved.fits",
-            output_wcs=reprojected_result.output_wcs,
+            set(config.planes.disabled_plane_ids),
             artifact_branch="deconvolved",
         )
+        deconvolved_paths = (
+            existing_branch_artifact_paths(output_dir, "deconvolved")
+            if mode == "compose-only" else branch_artifact_paths(output_dir, "deconvolved")
+        )
+        if deconvolved_paths is None:
+            raise RuntimeError(
+                "compose-only requires the requested deconvolved checkpoint; run full processing"
+            )
+        deconvolved_planes_path = deconvolved_paths.aligned_planes
+        deconvolved_checkpoint_path = deconvolved_paths.checkpoint_manifest
+        if mode != "compose-only":
+            deconvolved_records, deconvolved_planes_path = _export_branch_planes(
+                deconvolved_reprojected,
+                config,
+                deconvolved_planes_path,
+                output_wcs=reprojected_result.output_wcs,
+                artifact_branch="deconvolved",
+            )
+            deconvolved_checkpoint_path = None
+        if mode != "compose-only" and deconvolved_planes_path is not None:
+            _cancellation_checkpoint(cancel_requested, "deconvolved checkpoint publication")
+            deconvolved_checkpoint_path = write_checkpoint_manifest(
+                deconvolved_reprojected,
+                deconvolved_planes_path,
+                build_producer_inputs(
+                    config,
+                    cached_paths,
+                    "deconvolved",
+                    resolved_center_deg=(float(resolved_center.ra.deg), float(resolved_center.dec.deg)),
+                    source_ids_by_path=source_ids_by_path,
+                ),
+                "deconvolved",
+                destination=deconvolved_paths.checkpoint_manifest,
+                resolved_settings=_reprojection_settings(reprojected_result.diagnostics),
+            )
 
     footprint_overlay_path = _export_footprint_overlay(original_reprojected, output_dir / "footprints.png")
     _cancellation_checkpoint(cancel_requested, "composition")
@@ -275,28 +371,45 @@ def run_pipeline(
             _reprojection_settings(reprojected_result.diagnostics),
             candidate_manifest,
             execution_source,
+            stage_records=_checkpoint_stage_records(
+                original_checkpoint_path, deconvolved_checkpoint_path
+            ),
         )
         write_provenance(provenance, output_dir / "provenance.json")
         emit_log(logger, logging.INFO, "Pipeline finished in reproject-only mode", progress)
         return _finalize_artifacts(output_dir, Path(config_path) if config_path else None)
 
-    png_path, tiff_path = _compose_and_export_branch(
+    (
+        png_path, tiff_path, display_warnings, original_background_stage,
+        original_coverage_stage,
+        background_diagnostics_path, background_overlay_path,
+    ) = _compose_and_export_branch(
         original_reprojected,
         original_records,
         config,
-        output_dir / "composite.png",
-        output_dir / "composite.tiff",
+        original_paths.composite_png,
+        original_paths.composite_tiff,
     )
     deconvolved_png_path: Path | None = None
     deconvolved_tiff_path: Path | None = None
+    deconvolved_background_diagnostics_path: Path | None = None
+    deconvolved_background_overlay_path: Path | None = None
+    deconvolved_background_stage: dict[str, object] | None = None
+    deconvolved_coverage_stage: dict[str, object] | None = None
     if deconvolved_reprojected:
-        deconvolved_png_path, deconvolved_tiff_path = _compose_and_export_branch(
+        (
+            deconvolved_png_path, deconvolved_tiff_path, deconvolved_warnings,
+            deconvolved_background_stage, deconvolved_coverage_stage,
+            deconvolved_background_diagnostics_path,
+            deconvolved_background_overlay_path,
+        ) = _compose_and_export_branch(
             deconvolved_reprojected,
             deconvolved_records,
             config,
-            output_dir / "composite_deconvolved.png",
-            output_dir / "composite_deconvolved.tiff",
+            deconvolved_paths.composite_png,
+            deconvolved_paths.composite_tiff,
         )
+        display_warnings.extend(deconvolved_warnings)
 
     _cancellation_checkpoint(cancel_requested, "provenance and history commit")
 
@@ -309,6 +422,15 @@ def run_pipeline(
         _reprojection_settings(reprojected_result.diagnostics),
         candidate_manifest,
         execution_source,
+        display_warnings=sorted(set(display_warnings)),
+        stage_records=(
+            _checkpoint_stage_records(original_checkpoint_path, deconvolved_checkpoint_path)
+            + [record for record in (
+                original_background_stage, original_coverage_stage,
+                deconvolved_background_stage, deconvolved_coverage_stage,
+            )
+               if record is not None]
+        ),
     )
     write_provenance(provenance, output_dir / "provenance.json")
     emit_log(logger, logging.INFO, "Pipeline finished successfully", progress)
@@ -317,18 +439,43 @@ def run_pipeline(
         manifest_path=output_dir / "manifest.json",
         planes_path=original_planes_path,
         deconvolved_planes_path=deconvolved_planes_path,
+        checkpoint_manifest_path=original_checkpoint_path,
+        deconvolved_checkpoint_manifest_path=deconvolved_checkpoint_path,
         footprint_overlay_path=footprint_overlay_path,
         png_path=png_path,
         deconvolved_png_path=deconvolved_png_path,
         tiff_path=tiff_path,
         deconvolved_tiff_path=deconvolved_tiff_path,
+        background_diagnostics_path=background_diagnostics_path,
+        deconvolved_background_diagnostics_path=deconvolved_background_diagnostics_path,
+        background_overlay_path=background_overlay_path,
+        deconvolved_background_overlay_path=deconvolved_background_overlay_path,
         provenance_path=output_dir / "provenance.json",
         config_path=Path(config_path) if config_path else output_dir / "scene-card-input.json",
         inspected_plane_filters={
             plane.plane_id: str(plane.metadata.get("filter") or "")
             for plane in original_reprojected
         },
+        effective_canvas=(
+            {**config.canvas.model_dump(mode="json", exclude_none=True),
+             "frame_origin": "selected_footprints"}
+            if reprojected_result.diagnostics.get("auto_fitted") else None
+        ),
     )
+
+
+def _validate_selected_plane_coverage(planes: list[ReprojectedPlane]) -> None:
+    zero_coverage = [
+        plane.plane_id
+        for plane in planes
+        if not np.any(np.asarray(plane.footprint) > 0)
+    ]
+    if zero_coverage:
+        identifiers = ", ".join(sorted(zero_coverage))
+        raise RuntimeError(
+            "selected FITS products have zero footprint coverage on the configured canvas: "
+            f"{identifiers}"
+        )
 
 
 def _load_or_build_reprojected(
@@ -342,13 +489,49 @@ def _load_or_build_reprojected(
     progress: Callable[[str], None] | None,
     *,
     scene_card: SceneCard | None = None,
+    source_ids_by_path: dict[Path, str] | None = None,
 ) -> ReprojectionLoadResult:
-    exported_planes = output_dir / "exported_planes.fits"
-    exported_deconvolved_planes = output_dir / "exported_planes_deconvolved.fits"
-    if mode == "compose-only" and exported_planes.exists():
-        emit_log(logger, logging.INFO, "Compose-only mode reusing exported plane artifacts", progress)
-        original_planes = load_multiplane_records(exported_planes)
-        deconvolved_planes = load_multiplane_records(exported_deconvolved_planes) if exported_deconvolved_planes.exists() else []
+    original_paths = existing_branch_artifact_paths(output_dir, "original")
+    deconvolved_paths = existing_branch_artifact_paths(output_dir, "deconvolved")
+    if mode == "compose-only":
+        if original_paths is None:
+            raise RuntimeError(
+                "compose-only requires an aligned checkpoint; run full or reprojection-only processing"
+            )
+        emit_log(logger, logging.INFO, "Compose-only mode validating aligned checkpoints", progress)
+        center = (float(resolved_center.ra.deg), float(resolved_center.dec.deg))
+        original_inputs = build_producer_inputs(
+            config,
+            cached_paths,
+            "original",
+            resolved_center_deg=center,
+            source_ids_by_path=source_ids_by_path,
+        )
+        _, original_planes = load_validated_checkpoint(
+            original_paths.aligned_planes,
+            original_paths.checkpoint_manifest,
+            original_inputs,
+            "original",
+        )
+        deconvolved_planes: list[ReprojectedPlane] = []
+        if config.psf.enabled:
+            if deconvolved_paths is None:
+                raise RuntimeError(
+                    "compose-only requires the requested deconvolved checkpoint; run full processing"
+                )
+            deconvolved_inputs = build_producer_inputs(
+                config,
+                cached_paths,
+                "deconvolved",
+                resolved_center_deg=center,
+                source_ids_by_path=source_ids_by_path,
+            )
+            _, deconvolved_planes = load_validated_checkpoint(
+                deconvolved_paths.aligned_planes,
+                deconvolved_paths.checkpoint_manifest,
+                deconvolved_inputs,
+                "deconvolved",
+            )
         _validate_inspected_scene(scene_card, original_planes, require_deconvolved=bool(deconvolved_planes))
         return ReprojectionLoadResult(
             original_planes=original_planes,
@@ -371,6 +554,7 @@ def _load_or_build_reprojected(
         )
 
     fits_planes: list[FITSPlane] = []
+    original_presentations: list[NativePresentation] = []
     filter_skipped = 0
     load_failed = 0
     first_failure: str | None = None
@@ -380,6 +564,9 @@ def _load_or_build_reprojected(
     for source_path in cached_paths:
         try:
             plane = load_fits_plane(source_path)
+            authoritative_source_id = (source_ids_by_path or {}).get(source_path.resolve())
+            if authoritative_source_id is not None:
+                plane.source_ids = (authoritative_source_id,)
             plane.metadata.setdefault("artifact_branch", "original")
             plane_filter = str(plane.metadata.get("filter") or "")
             if config.planes.enabled_filters and plane_filter not in config.planes.enabled_filters:
@@ -394,6 +581,10 @@ def _load_or_build_reprojected(
             emit_log(logger, logging.WARNING, f"Skipping {source_path.name}: {exc}", progress)
             if config.execution.fail_fast:
                 raise
+            continue
+        # Keep preparation outside the FITS-load skip handler: numerical failures
+        # must abort rather than silently falling back to strict processing.
+        original_presentations.append(prepare_native_presentation(plane, enabled=config.bridge.enabled))
 
     diagnostics = {
         "cached_fits": len(cached_paths),
@@ -415,6 +606,28 @@ def _load_or_build_reprojected(
 
     _validate_inspected_scene(scene_card, fits_planes, require_deconvolved=config.psf.enabled)
 
+    if scene_card is not None and scene_card.canvas is not None \
+            and scene_card.canvas.frame_origin == "search_region":
+        products = {
+            (product.filename or ""): product.product_id
+            for product in (scene_card.selection.products or [])
+        } if scene_card.selection else {}
+        identities = [
+            products.get(Path(str(plane.metadata.get("source_path", ""))).name, plane.plane_id)
+            for plane in fits_planes
+        ]
+        fitted = fit_planes(fits_planes, identities)
+        if fitted.warnings:
+            raise RuntimeError(
+                "selected FITS footprints require confirmation before an extreme frame is applied: "
+                + " ".join(fitted.warnings)
+                + " Use Fit selected scans in Scene refinement to revise, apply, or keep the frame."
+            )
+        config.canvas = type(config.canvas).model_validate({
+            key: value for key, value in fitted.canvas.items() if key != "frame_origin"
+        })
+        diagnostics["auto_fitted"] = True
+
     deconvolved_fits_planes: list[FITSPlane] = []
     if config.psf.enabled:
         emit_log(logger, logging.INFO, "Building deconvolved cache companions", progress)
@@ -424,6 +637,18 @@ def _load_or_build_reprojected(
     else:
         diagnostics["deconvolved_loaded"] = 0
 
+    deconvolved_presentations = [
+        prepare_native_presentation(plane, enabled=config.bridge.enabled)
+        for plane in deconvolved_fits_planes
+    ]
+    prepared = [*original_presentations, *deconvolved_presentations]
+    retained_native_bytes = sum(
+        item.observation.data.nbytes + item.observation.valid.nbytes + item.observation.coverage.nbytes
+        + item.observation.mask.nbytes + item.values.nbytes + item.support.nbytes + item.estimate_mask.nbytes
+        for item in prepared
+    )
+    bridge_workspace_bytes = max((item.diagnostics.estimated_peak_working_bytes for item in prepared), default=0)
+    diagnostics["bridge"] = {item.observation.plane_id: item.diagnostics.record() for item in prepared}
     output_wcs, shape_out = build_output_wcs(config.canvas, resolved_center)
     reprojection_method = REPROJECT_METHOD_ADAPTIVE_FLUX if config.canvas.flux_conserving else REPROJECT_METHOD_INTERPOLATION
     reprojection_bytes_per_pixel = 16 if config.canvas.flux_conserving else 8
@@ -448,6 +673,7 @@ def _load_or_build_reprojected(
         len(fits_planes) + len(deconvolved_fits_planes),
         reprojection_bytes_per_pixel,
         reprojection_method,
+        native_bridge_peak_bytes=retained_native_bytes + bridge_workspace_bytes,
     )
     system_memory_bytes = get_system_memory_bytes()
     canvas_diag.update(
@@ -477,15 +703,15 @@ def _load_or_build_reprojected(
         )
         emit_log(logger, logging.WARNING, warning_message, progress)
 
-    original_reprojected = reproject_all(fits_planes, output_wcs, shape_out, config.canvas.flux_conserving, progress=progress)
+    original_reprojected = reproject_all(original_presentations, output_wcs, shape_out, config.canvas.flux_conserving, progress=progress)
     for plane in original_reprojected:
         plane.metadata.setdefault("artifact_branch", "original")
-        save_reprojected_plane(plane, output_wcs, reprojected_dir / "original")
+        save_reprojected_plane(plane, output_wcs, reprojected_dir / "original" / "aligned")
 
     deconvolved_reprojected: list[ReprojectedPlane] = []
     if deconvolved_fits_planes:
         deconvolved_reprojected = reproject_all(
-            deconvolved_fits_planes,
+            deconvolved_presentations,
             output_wcs,
             shape_out,
             config.canvas.flux_conserving,
@@ -493,7 +719,7 @@ def _load_or_build_reprojected(
         )
         for plane in deconvolved_reprojected:
             plane.metadata.setdefault("artifact_branch", "deconvolved")
-            save_reprojected_plane(plane, output_wcs, reprojected_dir / "deconvolved")
+            save_reprojected_plane(plane, output_wcs, reprojected_dir / "deconvolved" / "aligned")
 
     return ReprojectionLoadResult(
         original_planes=original_reprojected,
@@ -530,13 +756,98 @@ def _compose_and_export_branch(
     config: GalaxyConfig,
     png_output: Path,
     tiff_output: Path,
-) -> tuple[Path, Path]:
-    plane_arrays = {plane.plane_id: plane.data for plane in planes}
-    plane_meta = {plane.plane_id: plane.metadata for plane in planes}
+) -> tuple[
+    Path, Path, list[str], dict[str, object] | None, dict[str, object], Path | None, Path | None,
+]:
     enabled_planes = {record.plane_id for record in records if record.enabled}
-    composed = compose_channels(CompositionInputs(planes=plane_arrays, metadata=plane_meta), config.mapping, enabled_planes)
-    rgb = apply_tone(composed, config.tone, bit_depth=16)
-    return export_png(rgb, png_output), export_tiff(rgb, tiff_output)
+    rendered = render_aligned_planes(
+        planes,
+        config.mapping,
+        config.tone,
+        enabled_planes=enabled_planes,
+        bit_depth=16,
+        background=config.background,
+        coverage=config.coverage,
+    )
+    result = rendered.composition
+    by_id = {record.plane_id: record for record in records}
+    for plane_id, diagnostic in result.plane_diagnostics.items():
+        record = by_id.get(plane_id)
+        if record is None:
+            continue
+        record.native_unit = _string_or_none(diagnostic.get("native_unit"))
+        record.mask_sources = [str(item) for item in diagnostic.get("mask_sources", [])]
+        record.valid_coverage_fraction = _float_or_none(diagnostic.get("valid_coverage_fraction"))
+        record.normalization_mode = _string_or_none(diagnostic.get("normalization_mode"))
+        record.black_percentile = _float_or_none(diagnostic.get("black_percentile"))
+        record.white_percentile = _float_or_none(diagnostic.get("white_percentile"))
+        record.black_point = _float_or_none(diagnostic.get("black_point"))
+        record.white_point = _float_or_none(diagnostic.get("white_point"))
+        record.plane_gain = _float_or_none(diagnostic.get("gain"))
+        contribution = diagnostic.get("rgb_contribution_percent")
+        record.rgb_contribution_percent = (
+            {str(key): float(value) for key, value in contribution.items()}
+            if isinstance(contribution, dict) else None
+        )
+    diagnostics_path: Path | None = None
+    overlay_path: Path | None = None
+    if config.background.mode == "pedestal":
+        geometric, common, exclusion = background_masks(planes, config.background)
+        proposal = BackgroundProposal(
+            config.background.resolved_branches.get(str(planes[0].branch), {}),
+            geometric, common, exclusion
+        )
+        run_directory = (
+            png_output.parent.parent
+            if png_output.parent.name == planes[0].branch else png_output.parent
+        )
+        paths = (
+            existing_branch_artifact_paths(run_directory, planes[0].branch)
+            or branch_artifact_paths(run_directory, planes[0].branch)
+        )
+        diagnostics_path = write_background_diagnostics(proposal, paths.background_diagnostics)
+        overlay_path = write_background_overlay(proposal, paths.background_overlay)
+    coverage_stage = {
+        "stage_id": "presentation_coverage",
+        "algorithm_ids": ["COVERAGE-001"],
+        "algorithm_versions": {"presentation_coverage": "presentation-coverage-v1"},
+        "parent_ids": list(rendered.composition.required_plane_ids),
+        "source_content_identities": [
+            {"source_id": source_id}
+            for source_id in rendered.composition.required_source_ids
+        ],
+        "branch": planes[0].branch,
+        "input_domain": "display_rgb",
+        "output_domain": "display_rgb",
+        "grid_id": planes[0].grid_id,
+        "requested_settings": config.coverage.model_dump(mode="json"),
+        "resolved_settings": rendered.coverage.diagnostics,
+        "output_content_identity": {
+            "sha256": hashlib.sha256(np.ascontiguousarray(rendered.rgb).tobytes()).hexdigest()
+        },
+    }
+    return (
+        export_png(rendered.rgb, png_output),
+        export_tiff(rendered.rgb, tiff_output),
+        result.warnings,
+        rendered.background.stage_record,
+        coverage_stage,
+        diagnostics_path,
+        overlay_path,
+    )
+
+
+def _string_or_none(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _merge_selection_inputs(base: SelectionInputs, override: SelectionInputs | None) -> SelectionInputs:
@@ -587,6 +898,26 @@ def _local_product_manifest(
     return records
 
 
+def _source_ids_by_path(
+    manifest: list[dict[str, object]],
+    local_product_paths: dict[str, Path],
+) -> dict[Path, str]:
+    identities = {
+        Path(path).resolve(): str(candidate_id)
+        for candidate_id, path in local_product_paths.items()
+    }
+    for item in manifest:
+        local_path = item.get("local_path")
+        source_id = (
+            item.get("stable_product_identifier")
+            or item.get("candidate_id")
+            or item.get("product_identifier")
+        )
+        if local_path is not None and source_id is not None:
+            identities[Path(str(local_path)).resolve()] = str(source_id)
+    return identities
+
+
 def _validate_inspected_scene(
     card: SceneCard | None, planes: list[FITSPlane] | list[ReprojectedPlane], *,
     require_deconvolved: bool,
@@ -597,7 +928,10 @@ def _validate_inspected_scene(
     branches = ("original", "deconvolved") if require_deconvolved else ("original",)
     problems = [
         item for branch in branches
-        for item in readiness(card, "render", plane_filters=plane_filters, branch=branch)
+        for item in readiness(
+            card, "render", plane_filters=plane_filters, branch=branch,
+            inspected_plane_ids=True,
+        )
     ]
     if problems:
         message = "\n".join(f"{item.path}: [{item.code}] {item.message}" for item in problems)
@@ -623,25 +957,62 @@ def _reprojection_settings(diagnostics: dict[str, object]) -> dict[str, object]:
         "estimated_peak_bytes": diagnostics.get("estimated_peak_bytes"),
         "system_memory_bytes": diagnostics.get("system_memory_bytes"),
         "memory_warning_fraction": diagnostics.get("memory_warning_fraction"),
+        "bridge": diagnostics.get("bridge"),
         "deconvolved_loaded": diagnostics.get("deconvolved_loaded"),
     }
+
+
+def _checkpoint_stage_records(*paths: Path | None) -> list[dict[str, object]]:
+    return [
+        checkpoint_stage_record(read_checkpoint_manifest(path))
+        for path in paths
+        if path is not None
+    ]
 
 
 def _finalize_artifacts(
     output_dir: Path, config_path: Path | None = None,
     inspected_plane_filters: dict[str, str] | None = None,
 ) -> PipelineArtifacts:
+    original = existing_branch_artifact_paths(output_dir, "original")
+    deconvolved = existing_branch_artifact_paths(output_dir, "deconvolved")
     return PipelineArtifacts(
         workdir=output_dir,
         manifest_path=output_dir / "manifest.json",
-        planes_path=output_dir / "exported_planes.fits" if (output_dir / "exported_planes.fits").exists() else None,
-        deconvolved_planes_path=output_dir / "exported_planes_deconvolved.fits" if (output_dir / "exported_planes_deconvolved.fits").exists() else None,
+        planes_path=original.aligned_planes if original else None,
+        deconvolved_planes_path=deconvolved.aligned_planes if deconvolved else None,
+        checkpoint_manifest_path=(
+            original.checkpoint_manifest if original and original.checkpoint_manifest.exists() else None
+        ),
+        deconvolved_checkpoint_manifest_path=(
+            deconvolved.checkpoint_manifest if deconvolved and deconvolved.checkpoint_manifest.exists() else None
+        ),
         footprint_overlay_path=output_dir / "footprints.png" if (output_dir / "footprints.png").exists() else None,
-        png_path=output_dir / "composite.png" if (output_dir / "composite.png").exists() else None,
-        deconvolved_png_path=output_dir / "composite_deconvolved.png" if (output_dir / "composite_deconvolved.png").exists() else None,
-        tiff_path=output_dir / "composite.tiff" if (output_dir / "composite.tiff").exists() else None,
-        deconvolved_tiff_path=output_dir / "composite_deconvolved.tiff" if (output_dir / "composite_deconvolved.tiff").exists() else None,
+        png_path=original.composite_png if original and original.composite_png.exists() else None,
+        deconvolved_png_path=(
+            deconvolved.composite_png if deconvolved and deconvolved.composite_png.exists() else None
+        ),
+        tiff_path=original.composite_tiff if original and original.composite_tiff.exists() else None,
+        deconvolved_tiff_path=(
+            deconvolved.composite_tiff if deconvolved and deconvolved.composite_tiff.exists() else None
+        ),
+        background_diagnostics_path=(
+            original.background_diagnostics
+            if original and original.background_diagnostics.exists() else None
+        ),
+        deconvolved_background_diagnostics_path=(
+            deconvolved.background_diagnostics
+            if deconvolved and deconvolved.background_diagnostics.exists() else None
+        ),
+        background_overlay_path=(
+            original.background_overlay if original and original.background_overlay.exists() else None
+        ),
+        deconvolved_background_overlay_path=(
+            deconvolved.background_overlay
+            if deconvolved and deconvolved.background_overlay.exists() else None
+        ),
         provenance_path=output_dir / "provenance.json",
         config_path=config_path or output_dir / "scene-card-input.json",
         inspected_plane_filters=inspected_plane_filters or {},
+        effective_canvas=None,
     )

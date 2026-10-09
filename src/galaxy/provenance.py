@@ -12,6 +12,7 @@ import numpy
 import reproject
 import scipy
 
+from galaxy.bridge import BridgeProfile
 from galaxy.processing_config import GalaxyConfig
 from galaxy.planes import PlaneRecord
 from galaxy.selection import CandidateManifest
@@ -27,6 +28,8 @@ def build_provenance(
     reprojection_settings: dict[str, Any],
     candidate_manifest: CandidateManifest | None = None,
     execution_source: str = "raw_config_discovery",
+    display_warnings: list[str] | None = None,
+    stage_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     selection_section = {
         "source": execution_source,
@@ -63,9 +66,13 @@ def build_provenance(
         "skipped_products": skipped,
         "planes": [asdict(record) for record in plane_records],
         "reprojection": reprojection_settings,
+        "bridge": {"enabled": config.bridge.enabled, **BridgeProfile().identity()},
         "psf": config.psf.model_dump(mode="json"),
         "mapping": config.mapping.model_dump(mode="json"),
         "tone": config.tone.model_dump(mode="json"),
+        "tone_algorithms": _tone_algorithm_record(config),
+        "display": {"warnings": display_warnings or []},
+        "stage_records": stage_records or [],
         "software_versions": {
             "galaxy": "0.1.0",
             "astropy": astropy.__version__,
@@ -74,6 +81,25 @@ def build_provenance(
             "reproject": reproject.__version__,
             "scipy": scipy.__version__,
         },
+    }
+
+
+def _tone_algorithm_record(config: GalaxyConfig) -> dict[str, Any]:
+    tone = config.tone
+    methods = (
+        [tone.shared_stretch.kind] if tone.shared_stretch is not None
+        else [getattr(tone.stretch, channel).kind for channel in ("red", "green", "blue")]
+    )
+    versions = {"tone_application": "tone-v2"}
+    if "ghs" in methods:
+        versions["ghs_equations"] = "ghs-process-doc-3.0.4"
+    if tone.auto_stretch is not None:
+        versions["auto_stretch"] = tone.auto_stretch.algorithm_version
+    return {
+        "application": tone.application,
+        "methods": methods,
+        "gamut_policy": tone.gamut_policy,
+        "algorithm_versions": versions,
     }
 
 

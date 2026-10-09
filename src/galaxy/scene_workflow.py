@@ -1,23 +1,31 @@
 """UI-independent behavior for the five-screen scene-card workflow."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 from datetime import timezone
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 from uuid import uuid4
 
+from astropy.io import fits
+
+from .processing_config import PlaneNormalizationConfig
 from .scene_card import (
-    DependencyIssue, asset_path, create_scene, dependency_issues, duplicate_scene_draft,
+    DependencyIssue, asset_path, create_scene, dependency_issues, duplicate_scene,
     edit_scene, load_scene, save_scene, utc_now,
 )
-from .scene_models import Export, SceneCard, document, effective_inputs
+from .scene_models import Asset, Export, SceneCard, bridge_snapshot_matches, document, effective_inputs
 from .scene_readiness import ReadinessIssue, readiness
-from .selection import CandidateManifest, CandidateRecord, load_candidate_manifest
+from .selection import (
+    CandidateManifest, CandidateRecord, load_candidate_manifest, write_candidate_manifest,
+)
 from .mapping import default_plane_mappings
 from .discovery_sources import DiscoveryHint
 from .targeting import ResolverMatch
@@ -76,6 +84,13 @@ class ProjectLibrary:
 
 
 @dataclass(frozen=True, slots=True)
+class DeletedProject:
+    recovery_directory: Path
+    card_path: Path
+    asset_root: Path | None
+
+
+@dataclass(frozen=True, slots=True)
 class SourceArtifactRecord:
     product_id: str
     mission: str | None
@@ -85,6 +100,14 @@ class SourceArtifactRecord:
     status: Literal["remote_only", "available_local", "missing", "corrupt"]
     path: Path | None = None
     asset_id: str | None = None
+    native_unit: str | None = None
+    mask_sources: tuple[str, ...] = ()
+    normalization_mode: str = "native"
+    black_percentile: float | None = None
+    white_percentile: float | None = None
+    plane_gain: float = 1.0
+    valid_coverage_fraction: float | None = None
+    rgb_contribution_percent: dict[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +132,7 @@ class ArtifactInventory:
     assets: tuple[AssetArtifactRecord, ...]
     renders: tuple[RenderArtifactRecord, ...]
     export_count: int
+    warnings: tuple[str, ...] = ()
 
     def asset_count(self, kind: str) -> int:
         return sum(item.kind == kind for item in self.assets)
@@ -160,8 +184,14 @@ def resolve_workdir_input(path: str | Path) -> InputRoute:
         return classify_input(candidate)
     if not candidate.is_dir():
         raise ValueError(f"input does not exist: {candidate}")
-    for name in ("exported_planes.fits", "exported_planes_deconvolved.fits", "candidates.json"):
-        match = candidate / name
+    for name in (
+        "original/aligned-planes.fits",
+        "deconvolved/aligned-planes.fits",
+        "exported_planes.fits",
+        "exported_planes_deconvolved.fits",
+        "candidates.json",
+    ):
+        match = candidate / Path(name)
         if match.is_file():
             return classify_input(match)
     for match in sorted(candidate.glob("*.json")):
@@ -178,10 +208,10 @@ def discover_workspace_inputs(root: str | Path) -> list[InputRoute]:
     """List choices without selecting one; normal startup still opens Discovery."""
     base = Path(root).resolve()
     found: dict[Path, InputRoute] = {}
-    for search_root in (base / "artifacts", base / "examples"):
+    for search_root in (base / "artifacts",):
         if not search_root.is_dir():
             continue
-        for pattern in ("**/exported_planes.fits", "**/exported_planes_deconvolved.fits",
+        for pattern in ("**/aligned-planes.fits", "**/exported_planes.fits", "**/exported_planes_deconvolved.fits",
                         "**/candidates.json", "**/*.scene.json"):
             for candidate in search_root.glob(pattern):
                 try:
@@ -217,14 +247,6 @@ def list_scene_library(scene_directory: str | Path) -> list[LibraryEntry]:
 
 def list_project_library(scene_directory: str | Path, project_root: str | Path) -> ProjectLibrary:
     """Return separately owned example and user-scene entries with deterministic deduplication."""
-    examples = [
-        LibraryEntry(
-            entry.path, entry.card, entry.error, entry.dependencies, entry.render_issues,
-            entry.thumbnail_path, entry.thumbnail_kind, LibraryOrigin.BUNDLED_EXAMPLE,
-        )
-        for entry in list_scene_library(Path(project_root).resolve() / "artifacts")
-        if entry.card is not None
-    ]
     user_entries = [
         LibraryEntry(
             entry.path, entry.card, entry.error, entry.dependencies, entry.render_issues,
@@ -232,13 +254,25 @@ def list_project_library(scene_directory: str | Path, project_root: str | Path) 
         )
         for entry in list_scene_library(scene_directory)
     ]
+    user_by_path = {str(entry.path.resolve()).casefold(): entry for entry in user_entries}
+    examples: list[LibraryEntry] = []
+    for entry in list_scene_library(Path(project_root).resolve() / "examples"):
+        if entry.card is None:
+            continue
+        user_copy = user_by_path.get(
+            str(example_user_path(entry.path, scene_directory)).casefold()
+        )
+        examples.append(LibraryEntry(
+            entry.path, entry.card, entry.error, entry.dependencies, entry.render_issues,
+            user_copy.thumbnail_path if user_copy and user_copy.card else None,
+            user_copy.thumbnail_kind if user_copy and user_copy.card else "placeholder",
+            LibraryOrigin.BUNDLED_EXAMPLE,
+        ))
     seen_paths = {str(entry.path.resolve()).casefold() for entry in examples}
-    seen_scene_ids = {entry.card.scene_id for entry in examples if entry.card is not None}
     saved: list[LibraryEntry] = []
     for entry in user_entries:
         equivalent_path = str(entry.path.resolve()).casefold() in seen_paths
-        duplicate_id = entry.card is not None and entry.card.scene_id in seen_scene_ids
-        if equivalent_path or duplicate_id:
+        if equivalent_path:
             continue
         saved.append(entry)
     return ProjectLibrary(tuple(examples), tuple(saved))
@@ -263,6 +297,7 @@ def inspect_scene_artifacts(card: SceneCard, card_path: str | Path | None) -> Ar
         return ("missing" if issue.code == "missing" else "corrupt"), path
 
     selected = set(card.selection.selected_product_ids or []) if card.selection else set()
+    rendered_diagnostics = _current_plane_diagnostics(card, card_path)
     sources: list[SourceArtifactRecord] = []
     for product in card.selection.products or [] if card.selection else []:
         if product.product_id not in selected:
@@ -273,9 +308,25 @@ def inspect_scene_artifacts(card: SceneCard, card_path: str | Path | None) -> Ar
             status, path = "remote_only", None
         else:
             status, path = "missing", None
+        native_unit, mask_sources = _source_fits_display_metadata(path) if path and path.is_file() else (None, ())
+        normalization = _effective_normalization(card, product.filter)
+        plane_id = Path(product.filename).stem if product.filename else ""
+        rendered = rendered_diagnostics.get(plane_id, {})
         sources.append(SourceArtifactRecord(
             product.product_id, product.mission, product.filter, product.product_version,
             product.filename, status, path, product.cached_asset_id,
+            native_unit or _string_or_none(rendered.get("native_unit")),
+            mask_sources or tuple(str(item) for item in rendered.get("mask_sources", [])),
+            str(rendered.get("normalization_mode") or normalization.mode),
+            _float_or_none(rendered.get("black_percentile")) if rendered else (
+                normalization.black_percentile if normalization.mode == "percentile" else None
+            ),
+            _float_or_none(rendered.get("white_percentile")) if rendered else (
+                normalization.white_percentile if normalization.mode == "percentile" else None
+            ),
+            _float_or_none(rendered.get("plane_gain")) or normalization.gain,
+            _float_or_none(rendered.get("valid_coverage_fraction")),
+            rendered.get("rgb_contribution_percent") if isinstance(rendered.get("rgb_contribution_percent"), dict) else None,
         ))
     assets: list[AssetArtifactRecord] = []
     for asset_id, asset in (card.assets or {}).items():
@@ -290,13 +341,91 @@ def inspect_scene_artifacts(card: SceneCard, card_path: str | Path | None) -> Ar
                              "current" if record.render_id in current_ids else "stale")
         for record in card.renders or []
     )
-    return ArtifactInventory(tuple(sources), tuple(assets), renders, len(card.exports or []))
+    units = {item.native_unit.casefold() for item in sources if item.native_unit}
+    warnings: list[str] = []
+    if len(units) > 1 and any(item.normalization_mode == "native" for item in sources):
+        warnings.append(
+            "Mixed native FITS units are selected while native normalization is enabled; "
+            "some planes may be visually suppressed."
+        )
+    return ArtifactInventory(tuple(sources), tuple(assets), renders, len(card.exports or []), tuple(warnings))
+
+
+def _effective_normalization(card: SceneCard, filter_name: str | None) -> PlaneNormalizationConfig:
+    defaults: dict[str, object] = {}
+    if card.mapping and card.mapping.defaults and card.mapping.defaults.normalization:
+        defaults = card.mapping.defaults.normalization.model_dump(exclude_none=True)
+    override: dict[str, object] = {}
+    for contribution in card.mapping.planes or [] if card.mapping else []:
+        if contribution.filter and contribution.filter.upper() == str(filter_name or "").upper():
+            if contribution.normalization:
+                override = contribution.normalization.model_dump(exclude_none=True)
+            break
+    return PlaneNormalizationConfig.model_validate({**defaults, **override})
+
+
+def _source_fits_display_metadata(path: Path) -> tuple[str | None, tuple[str, ...]]:
+    try:
+        with fits.open(path, memmap=True, lazy_load_hdus=True) as hdul:
+            science = next((hdu for hdu in hdul if str(hdu.name).upper() == "SCI"), hdul[0])
+            native_unit = science.header.get("BUNIT") or hdul[0].header.get("BUNIT")
+            mask_sources = tuple(
+                name for name in ("DQ", "WHT", "CTX")
+                if any(str(hdu.name).upper() == name for hdu in hdul)
+            )
+            return _string_or_none(native_unit), mask_sources
+    except (OSError, ValueError):
+        return None, ()
+
+
+def _current_plane_diagnostics(
+    card: SceneCard, card_path: str | Path | None
+) -> dict[str, dict[str, object]]:
+    if card_path is None:
+        return {}
+    render = matching_render(card, "original")
+    if render is None or not card.assets:
+        return {}
+    asset = card.assets.get(render.provenance_asset_id)
+    if asset is None or asset.path is None:
+        return {}
+    path = asset_path(card_path, asset)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return {
+        str(item.get("plane_id")): item
+        for item in payload.get("planes", [])
+        if (
+            isinstance(item, dict)
+            and item.get("plane_id")
+            and item.get("artifact_branch", "original") == "original"
+        )
+    }
+
+
+def _string_or_none(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _thumbnail(
     card: SceneCard, card_path: Path, dependencies: tuple[DependencyIssue, ...]
 ) -> tuple[Path | None, str]:
     asset_id = card.thumbnail_asset_id
+    if asset_id and card.assets and card.assets[asset_id].kind == "render_thumbnail" and matching_render(card) is None:
+        return None, "placeholder"
     if not asset_id or not card.assets or asset_id not in card.assets:
         return None, "placeholder"
     if any(issue.asset_id == asset_id for issue in dependencies):
@@ -318,6 +447,88 @@ def default_scene_path(card: SceneCard, scene_directory: str | Path) -> Path:
     return Path(scene_directory).resolve() / scene_filename(card.title, card.scene_id)
 
 
+def associated_asset_root(card_path: str | Path) -> Path:
+    path = Path(card_path).resolve()
+    if path.name.endswith(".scene.json"):
+        name = f"{path.name[:-len('.scene.json')]}.assets"
+    else:
+        name = path.stem
+    return path.parent / name
+
+
+def delete_library_scene(
+    entry: LibraryEntry,
+    scene_directory: str | Path,
+    *,
+    move: Callable[[str | Path, str | Path], object] = os.replace,
+    transaction_id: str | None = None,
+) -> DeletedProject:
+    """Move one user scene and its optional asset root into recoverable storage."""
+    if entry.origin is not LibraryOrigin.USER_SCENE:
+        raise ValueError("bundled examples cannot be deleted")
+    if entry.card is None:
+        raise ValueError("invalid scene cards cannot be deleted")
+    directory = Path(scene_directory).resolve()
+    source = entry.path.resolve()
+    if source.parent != directory or not source.is_file():
+        raise ValueError("scene deletion target must be a scene-card file in the scene directory")
+    if _is_reparse_point(source):
+        raise ValueError("scene deletion does not follow reparse-point scene cards")
+    asset_root = associated_asset_root(source)
+    if asset_root.exists():
+        if asset_root.parent != directory or not asset_root.is_dir():
+            raise ValueError("associated asset root must be a directory in the scene directory")
+        if _is_reparse_point(asset_root):
+            raise ValueError("scene deletion does not follow reparse-point asset roots")
+    else:
+        asset_root = None
+
+    recovery_root = directory / ".galaxy-trash"
+    recovery_root.mkdir(parents=True, exist_ok=True)
+    recovery_directory = recovery_root / (transaction_id or str(uuid4()))
+    recovery_directory.mkdir(exist_ok=False)
+    targets = [source, *([asset_root] if asset_root is not None else [])]
+    manifest_path = recovery_directory / "recovery.json"
+    manifest_path.write_text(json.dumps({
+        "deleted_at": utc_now(),
+        "scene_id": entry.card.scene_id,
+        "title": entry.card.title,
+        "members": [
+            {"original_path": str(target), "recovery_name": target.name}
+            for target in targets
+        ],
+    }, indent=2), encoding="utf-8")
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for target in targets:
+            destination = recovery_directory / target.name
+            move(target, destination)
+            moved.append((target, destination))
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for original, recovered in reversed(moved):
+            try:
+                move(recovered, original)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"{recovered} -> {original}: {rollback_exc}")
+        if not rollback_errors:
+            manifest_path.unlink(missing_ok=True)
+            try:
+                recovery_directory.rmdir()
+            except OSError:
+                pass
+        suffix = "" if not rollback_errors else "; rollback failed: " + "; ".join(rollback_errors)
+        raise OSError(f"project deletion failed and was rolled back: {exc}{suffix}") from exc
+    return DeletedProject(recovery_directory, source, asset_root)
+
+
+def _is_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
+    return bool(attributes & 0x400)
+
+
 def save_draft(
     card: SceneCard, scene_directory: str | Path, path: str | Path | None = None
 ) -> tuple[SceneCard, Path]:
@@ -325,12 +536,52 @@ def save_draft(
     return save_scene(card, destination), destination
 
 
-def save_example_as_user_scene(
-    card: SceneCard, scene_directory: str | Path
+def example_user_path(example_path: str | Path, scene_directory: str | Path) -> Path:
+    source = Path(example_path).resolve()
+    if source.suffix.lower() != ".json":
+        raise ValueError("bundled example must be a JSON scene card")
+    return Path(scene_directory).resolve() / source.name
+
+
+def materialize_example(
+    example_path: str | Path, scene_directory: str | Path, *, overwrite: bool = False
 ) -> tuple[SceneCard, Path]:
-    """Commit an independent identity; the bundled source card is never a destination."""
-    copy = duplicate_scene_draft(card, title=card.title)
-    return save_draft(copy, scene_directory)
+    """Atomically copy a validated example JSON without touching its user asset root."""
+    source = Path(example_path).resolve()
+    card = load_scene(source)
+    destination = example_user_path(source, scene_directory)
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"example user copy already exists: {destination}")
+    payload = source.read_bytes()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=destination.parent, prefix=f".{destination.name}.",
+            suffix=".tmp", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    except Exception:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise
+    copied = load_scene(destination)
+    if copied.scene_id != card.scene_id:
+        raise ValueError("materialized example changed scene identity")
+    return copied, destination
+
+
+def open_example_user_copy(
+    example_path: str | Path, scene_directory: str | Path
+) -> tuple[SceneCard, Path]:
+    destination = example_user_path(example_path, scene_directory)
+    if destination.exists():
+        return load_scene(destination), destination
+    return materialize_example(example_path, scene_directory)
 
 
 def duplicate_library_scene(
@@ -338,9 +589,19 @@ def duplicate_library_scene(
 ) -> tuple[SceneCard, Path]:
     if entry.card is None:
         raise ValueError("cannot duplicate an invalid scene card")
+    if entry.origin is LibraryOrigin.BUNDLED_EXAMPLE:
+        return materialize_example(entry.path, scene_directory)
     title = f"{entry.card.title} copy"
-    duplicate = duplicate_scene_draft(entry.card, title=title)
-    destination = default_scene_path(duplicate, scene_directory)
+    identity = create_scene(title)
+    destination = default_scene_path(identity, scene_directory)
+    duplicate = duplicate_scene(
+        entry.card,
+        entry.path,
+        destination,
+        title=title,
+        materialization="link_or_copy",
+        identity=identity,
+    )
     return duplicate, destination
 
 
@@ -421,8 +682,9 @@ def draft_from_discovery_hint(
 def draft_from_resolver_match(
     query: str, match: ResolverMatch, source: str, *, region_size_arcmin: float
 ) -> SceneCard:
+    resolved_name = match.label if match.label.strip() != query.strip() else None
     card = draft_from_target(
-        name=query, resolved_name=match.label, ra_deg=match.ra_deg, dec_deg=match.dec_deg,
+        name=query, resolved_name=resolved_name, ra_deg=match.ra_deg, dec_deg=match.dec_deg,
         width_arcmin=region_size_arcmin, height_arcmin=region_size_arcmin,
     )
     data = document(card)
@@ -463,8 +725,69 @@ def initialize_canvas(card: SceneCard, *, reset: bool = False) -> SceneCard:
         "center": {"mode": "explicit", "ra_deg": target.ra_deg, "dec_deg": target.dec_deg},
         "projection": "TAN", "pixel_scale_arcsec": 1.0,
         "width": math.ceil(width_arcmin * 60), "height": math.ceil(height_arcmin * 60),
-        "rotation_deg": 0.0, "flux_conserving": True,
+        "rotation_deg": 0.0, "flux_conserving": True, "frame_origin": "search_region",
     }})
+
+
+def selected_fits_paths(
+    card: SceneCard, card_path: str | Path,
+) -> tuple[list[Path], list[str], list[str]]:
+    """Resolve selected local FITS without searching outside the project's asset roots."""
+    scene_path = Path(card_path).resolve()
+    products = {item.product_id: item for item in (card.selection.products or [])} if card.selection else {}
+    selected = card.selection.selected_product_ids or [] if card.selection else []
+    roots = [
+        associated_asset_root(scene_path),
+        scene_path.parent / f"{scene_path.stem}.assets",
+        scene_path.parent / scene_path.stem,
+    ]
+    found: list[Path] = []
+    identities: list[str] = []
+    errors: list[str] = []
+    for product_id in selected:
+        product = products.get(product_id)
+        if product is None:
+            errors.append(f"{product_id}: product metadata is missing")
+            continue
+        path: Path | None = None
+        if product.cached_asset_id:
+            asset = (card.assets or {}).get(product.cached_asset_id)
+            if asset is not None and asset.path:
+                candidate = asset_path(scene_path, asset)
+                if candidate.is_file():
+                    path = candidate
+        if path is None and product.filename:
+            matches = sorted({
+                candidate.resolve()
+                for root in roots if root.is_dir()
+                for candidate in root.rglob(product.filename)
+                if candidate.is_file() and candidate.parent.name == "cache"
+            })
+            if len(matches) == 1:
+                path = matches[0]
+            elif len(matches) > 1:
+                signatures = {(candidate.stat().st_size, _file_digest(candidate)) for candidate in matches}
+                if len(signatures) == 1:
+                    path = matches[-1]
+                else:
+                    errors.append(
+                        f"{product_id}: multiple nonidentical local files match {product.filename}"
+                    )
+                    continue
+        if path is None:
+            errors.append(f"{product_id}: selected FITS is not downloaded locally")
+            continue
+        found.append(path)
+        identities.append(product_id)
+    return found, identities, errors
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def product_from_candidate(candidate: CandidateRecord) -> dict[str, object]:
@@ -480,8 +803,71 @@ def product_from_candidate(candidate: CandidateRecord) -> dict[str, object]:
     return product
 
 
+def persist_candidate_manifest(
+    card: SceneCard, card_path: str | Path, manifest: CandidateManifest,
+) -> tuple[SceneCard, Path]:
+    """Persist and register a content-addressed discovery snapshot before Apply."""
+    scene_path = Path(card_path).resolve()
+    if scene_path.name.endswith(".scene.json"):
+        root_name = f"{scene_path.name[:-len('.scene.json')]}.assets"
+    else:
+        root_name = scene_path.stem
+    payload = json.dumps(manifest.to_dict(), indent=2).replace("\n", os.linesep).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    asset_id = f"candidate-manifest-{digest[:16]}"
+    existing = (card.assets or {}).get(asset_id)
+    if existing is not None:
+        path = asset_path(scene_path, existing)
+        if not path.is_file():
+            raise FileNotFoundError(f"candidate manifest asset is missing: {path}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError(f"candidate manifest asset is corrupt: {path}")
+    else:
+        has_manifest = any(asset.kind == "candidate_manifest" for asset in (card.assets or {}).values())
+        filename = "candidates.json" if not has_manifest else f"candidates-{digest[:12]}.json"
+        relative = f"{root_name}/inputs/discovery/{filename}"
+        path = scene_path.parent / Path(relative)
+        write_candidate_manifest(manifest, path)
+        data = document(card)
+        data.setdefault("assets", {})[asset_id] = document(Asset(
+            kind="candidate_manifest", path=relative.replace("\\", "/"),
+            media_type="application/json", byte_count=len(payload), sha256=digest,
+        ))
+        card = SceneCard.model_validate(data)
+    data = document(card)
+    discovery = dict(data.get("discovery", {}))
+    discovery["candidate_manifest_asset_id"] = asset_id
+    discovery["archive_retrieved_at"] = manifest.generated_at.replace("+00:00", "Z")
+    data["discovery"] = discovery
+    return SceneCard.model_validate(data), path
+
+
+def manifest_from_scene_asset(card: SceneCard, card_path: str | Path) -> CandidateManifest | None:
+    asset_id = card.discovery.candidate_manifest_asset_id if card.discovery else None
+    if asset_id is None:
+        return None
+    asset = (card.assets or {}).get(asset_id)
+    if asset is None or asset.kind != "candidate_manifest":
+        raise ValueError("candidate manifest reference is unresolved")
+    path = asset_path(card_path, asset)
+    if not path.is_file():
+        raise FileNotFoundError(f"candidate manifest asset is missing: {path}")
+    payload = path.read_bytes()
+    if asset.byte_count is not None and len(payload) != asset.byte_count:
+        raise ValueError(f"candidate manifest asset has the wrong size: {path}")
+    if asset.sha256 is not None and hashlib.sha256(payload).hexdigest() != asset.sha256.lower():
+        raise ValueError(f"candidate manifest asset checksum mismatch: {path}")
+    return load_candidate_manifest(path)
+
+
 def apply_manifest_selection(card: SceneCard, manifest: CandidateManifest) -> SceneCard:
-    products = [product_from_candidate(item) for item in manifest.candidates]
+    products: list[dict[str, object]] = []
+    for item in manifest.candidates:
+        product = product_from_candidate(item)
+        cached_asset_id = _local_source_asset_id(card, item.candidate_id, item.product_filename)
+        if cached_asset_id is not None:
+            product["cached_asset_id"] = cached_asset_id
+        products.append(product)
     selected = [item.candidate_id for item in manifest.candidates if item.selected]
     observations = sorted({
         identity for item in manifest.candidates if item.selected
@@ -496,6 +882,39 @@ def apply_manifest_selection(card: SceneCard, manifest: CandidateManifest) -> Sc
         "planes": {"enabled_filters": filters, "disabled_plane_ids": [],
                    "export_multiplane_fits": True},
     })
+
+
+def _local_source_asset_id(
+    card: SceneCard, product_id: str, filename: str | None,
+) -> str | None:
+    assets = card.assets or {}
+    existing = {
+        product.product_id: product.cached_asset_id
+        for product in (card.selection.products or [])
+    } if card.selection else {}
+    existing_id = existing.get(product_id)
+    if (
+        existing_id is not None
+        and existing_id in assets
+        and assets[existing_id].kind == "source"
+        and assets[existing_id].path is not None
+    ):
+        return existing_id
+    conventional = f"source-{product_id}"
+    if (
+        conventional in assets
+        and assets[conventional].kind == "source"
+        and assets[conventional].path is not None
+    ):
+        return conventional
+    if not filename:
+        return None
+    matches = [
+        asset_id for asset_id, asset in assets.items()
+        if asset.kind == "source" and asset.path is not None
+        and Path(asset.path).name.casefold() == filename.casefold()
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def manifest_from_card(card: SceneCard) -> CandidateManifest | None:
@@ -529,11 +948,14 @@ def manifest_from_card(card: SceneCard) -> CandidateManifest | None:
     )
     return CandidateManifest(
         generated_at=card.updated_at, config_path=None, selection_policy=policy,
-        max_observations_per_filter=maximum, candidates=candidates,
+        max_observations_per_filter=maximum, selection_mode="custom",
+        candidates=candidates,
     )
 
 
-def materialize_render_defaults(card: SceneCard) -> SceneCard:
+def materialize_render_defaults(
+    card: SceneCard, *, replace_existing: bool = False,
+) -> SceneCard:
     if card.canvas is None:
         card = initialize_canvas(card)
     selected = set(card.selection.selected_product_ids or []) if card.selection else set()
@@ -548,13 +970,23 @@ def materialize_render_defaults(card: SceneCard) -> SceneCard:
     if card.planes is None or card.planes.enabled_filters is None:
         changes["planes"] = {"enabled_filters": filters, "disabled_plane_ids": [],
                              "export_multiplane_fits": True}
-    if card.mapping is None or not card.mapping.planes:
+    if replace_existing or card.mapping is None or not card.mapping.planes:
         weights = recommended_rgb(filters)
         changes["mapping"] = {
-            "defaults": {"strategy": "continuum"},
+            "defaults": {
+                "strategy": "continuum",
+                "normalization": {
+                    "mode": "percentile",
+                    "black_percentile": 0.5,
+                    "white_percentile": 99.5,
+                    "stretch": "asinh",
+                    "stretch_parameter": 4.0,
+                    "gain": 1.0,
+                },
+            },
             "planes": [{"filter": name, "rgb": weights[name]} for name in filters],
         }
-    if card.tone is None:
+    if replace_existing or card.tone is None:
         changes["tone"] = {
             "stretch": {channel: {"kind": "asinh", "parameter": 4.0}
                         for channel in ("red", "green", "blue")},
@@ -563,7 +995,30 @@ def materialize_render_defaults(card: SceneCard) -> SceneCard:
             "bias": {channel: 0.0 for channel in ("red", "green", "blue")},
             "saturation": 1.0,
         }
-    if card.psf is None:
+    if replace_existing or card.background is None:
+        changes["background"] = {
+            "mode": "off",
+            "black_reference_policy": "legacy_percentile",
+            "inclusion_regions": [],
+            "exclusion_regions": [],
+            "estimator": {
+                "clip_sigma": 3.0,
+                "max_iterations": 5,
+                "minimum_samples": 256,
+                "minimum_valid_fraction": 0.5,
+            },
+            "resolved_branches": {},
+        }
+    if replace_existing or card.coverage is None:
+        changes["coverage"] = {
+            "policy": "available_contributors",
+            "tone_reference": "common_required_bands",
+            "crop": "none",
+            "padding_pixels": 0,
+        }
+    if card.bridge is None:
+        changes["bridge"] = {"enabled": True}
+    if replace_existing or card.psf is None:
         changes["psf"] = {"enabled": False}
     return edit_scene(card, changes) if changes else card
 
@@ -602,7 +1057,8 @@ def matching_render(
 ):
     for record in reversed(card.renders or []):
         if (record.branch == branch and record.content_revision == card.content_revision
-                and effective_inputs(record.inputs) == effective_inputs(card)):
+                and effective_inputs(record.inputs) == effective_inputs(card)
+                and bridge_snapshot_matches(record.inputs, card)):
             return record
     return None
 
@@ -665,12 +1121,17 @@ def resize_canvas(card: SceneCard, width: int, height: int) -> SceneCard:
 def export_current_render(
     card: SceneCard, card_path: str | Path, destination: str | Path, *,
     output_format: Literal["png", "tiff"], overwrite: bool = False,
-    branch: Literal["original", "deconvolved"] = "original",
+    branch: Literal["original", "deconvolved"],
 ) -> SceneCard:
     record = matching_render(card, branch)
     if record is None:
         raise ValueError("a current successful render is required")
-    source = asset_path(card_path, (card.assets or {})[record.image_asset_id])
+    source_id = record.image_asset_id if output_format == "png" else record.high_depth_image_asset_id
+    if source_id is None:
+        raise ValueError(
+            f"current {branch} render does not register a {output_format} output artifact"
+        )
+    source = asset_path(card_path, (card.assets or {})[source_id])
     target = Path(destination).resolve()
     allowed = {".png"} if output_format == "png" else {".tif", ".tiff"}
     if target.suffix.lower() not in allowed:
@@ -678,9 +1139,8 @@ def export_current_render(
     if target.exists() and not overwrite:
         raise FileExistsError(f"export exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    from PIL import Image
-    with Image.open(source) as image:
-        image.save(target, format="PNG" if output_format == "png" else "TIFF")
+    import shutil
+    shutil.copyfile(source, target)
     data = document(card)
     entry = Export(
         export_id=str(uuid4()), render_id=record.render_id, created_at=utc_now(),

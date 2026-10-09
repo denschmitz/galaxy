@@ -39,10 +39,15 @@ def prepare_scene_execution(card: SceneCard, card_path: str | Path) -> SceneExec
     data = document(frozen)
     canvas = dict(data["canvas"])
     canvas.pop("view_state", None)
+    canvas.pop("frame_origin", None)
     target_data = data.get("target")
     target: dict[str, Any] | None = None
     if target_data and "region" in target_data:
-        target = {key: value for key, value in target_data.items() if key != "coordinate_frame"}
+        processing_target_fields = {"name", "ra_deg", "dec_deg", "ra", "dec", "region"}
+        target = {
+            key: value for key, value in target_data.items()
+            if key in processing_target_fields
+        }
 
     search = {
         "missions": [], "instruments": [], "detectors": [], "filters": [], "product_types": [],
@@ -74,7 +79,17 @@ def prepare_scene_execution(card: SceneCard, card_path: str | Path) -> SceneExec
         "enabled_filters": [], "disabled_plane_ids": [], "export_multiplane_fits": False,
         **data["planes"],
     }
+    coverage = {
+        "policy": "available_contributors", "tone_reference": "output_support",
+        "crop": "none", "padding_pixels": 0,
+        **data.get("coverage", {}),
+    }
     tone = dict(data["tone"])
+    background = {
+        "mode": "off", "black_reference_policy": "legacy_percentile",
+        "inclusion_regions": [], "exclusion_regions": [], "resolved_branches": {},
+        **data.get("background", {}),
+    }
     psf = {"enabled": False, "per_plane": {}, **data["psf"]}
     execution = {
         "fail_fast": False, "log_file": "galaxy.log",
@@ -100,8 +115,11 @@ def prepare_scene_execution(card: SceneCard, card_path: str | Path) -> SceneExec
         "search": search,
         "canvas": canvas,
         "planes": planes,
+        "coverage": coverage,
         "mapping": mapping,
         "tone": tone,
+        "bridge": data.get("bridge", {"enabled": True}),
+        "background": background,
         "psf": psf,
         "execution": execution,
     })

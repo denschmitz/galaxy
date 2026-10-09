@@ -22,6 +22,11 @@ class CachedCandidateResult:
     stale: bool
 
 
+def candidate_cache_directory(scene_directory: str | Path) -> Path:
+    """Return the canonical regenerable discovery-cache directory."""
+    return Path(scene_directory).resolve() / ".galaxy-cache" / "candidates"
+
+
 def candidate_cache_path(cache_directory: str | Path, card: SceneCard) -> Path:
     query = {
         "target": document(card.target) if card.target is not None else None,

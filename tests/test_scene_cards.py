@@ -19,6 +19,28 @@ from galaxy.scene_readiness import readiness
 NOW = "2026-09-11T12:00:00Z"
 
 
+def test_dependency_verification_streams_local_asset(monkeypatch, tmp_path: Path) -> None:
+    payload = b"source-fits-placeholder" * 1024
+    binary = tmp_path / "Scene" / "inputs" / "sources" / "identity" / "source.fits"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(payload)
+    card = create_scene("Scene", now=NOW)
+    data = document(card)
+    data["assets"] = {
+        "source": {
+            "kind": "source",
+            "path": "Scene/inputs/sources/identity/source.fits",
+            "byte_count": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+    }
+    card = SceneCard.model_validate(data)
+
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(AssertionError("full read")))
+
+    assert dependency_issues(card, tmp_path / "Scene.json") == []
+
+
 @pytest.fixture
 def ready() -> SceneCard:
     card = create_scene("Fixture", now=NOW)
@@ -310,6 +332,59 @@ def test_duplicate_independent_assets(ready: SceneCard, tmp_path: Path) -> None:
         duplicate_scene(card, source, destination, now=NOW)
 
 
+def test_duplicate_linked_inputs_use_independent_paths_and_survive_unlink(
+    ready: SceneCard, tmp_path: Path,
+) -> None:
+    data = document(rendered(ready))
+    data["assets"]["source"] = {"kind": "source", "path": "data/source.fits"}
+    source = tmp_path / "original.json"
+    card = save_scene(
+        SceneCard.model_validate(data), source,
+        asset_contents={
+            "image": b"i", "prov": b"p", "thumb": b"t", "source": b"source",
+        },
+        now=NOW,
+    )
+    destination = tmp_path / "copy" / "copy.json"
+
+    copied = duplicate_scene(
+        card, source, destination, now=NOW, materialization="link_or_copy",
+    )
+    source_asset = asset_path(source, card.assets["source"])
+    copied_asset = asset_path(destination, copied.assets["source"])
+
+    assert destination.is_file()
+    assert copied.scene_id != card.scene_id
+    assert copied.renders is None and copied.exports is None
+    assert copied_asset != source_asset
+    assert copied_asset.read_bytes() == source_asset.read_bytes() == b"source"
+    copied_asset.unlink()
+    assert source_asset.read_bytes() == b"source"
+
+
+def test_duplicate_link_failure_uses_verified_streaming_copy(
+    ready: SceneCard, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = document(ready)
+    data["assets"] = {"source": {"kind": "source", "path": "data/source.fits"}}
+    source = tmp_path / "original.json"
+    card = save_scene(
+        SceneCard.model_validate(data), source,
+        asset_contents={"source": b"source"}, now=NOW,
+    )
+    monkeypatch.setattr("galaxy.scene_card.os.link", lambda *_: (_ for _ in ()).throw(OSError("no links")))
+    destination = tmp_path / "copy" / "copy.json"
+
+    copied = duplicate_scene(
+        card, source, destination, now=NOW, materialization="link_or_copy",
+    )
+    copied_asset = asset_path(destination, copied.assets["source"])
+    copied_asset.write_bytes(b"changed")
+
+    assert asset_path(source, card.assets["source"]).read_bytes() == b"source"
+    assert copied_asset.read_bytes() == b"changed"
+
+
 def test_symlink_escape_is_a_dependency_error(tmp_path: Path) -> None:
     root = tmp_path / "cards"
     outside = tmp_path / "outside"
@@ -480,7 +555,7 @@ def test_pillars_library_example_is_valid_without_untracked_artifacts() -> None:
     from galaxy.scene_workflow import list_scene_library
 
     project_root = Path(__file__).resolve().parents[1]
-    path = project_root / "artifacts" / "Pillars.json"
+    path = project_root / "examples" / "Pillars.json"
     card = load_scene(path)
     assert card.title == "Pillars of Creation"
     assert len(card.selection.products or []) == 6
@@ -496,3 +571,11 @@ def test_pillars_library_example_is_valid_without_untracked_artifacts() -> None:
     entries = {entry.path.name: entry for entry in list_scene_library(path.parent)}
     assert entries["Pillars.json"].card == card
     assert entries["Pillars.json"].error is None
+
+
+def test_example_source_directory_contains_only_json_scene_cards() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    paths = sorted(path for path in (project_root / "examples").iterdir() if path.is_file())
+    assert paths
+    assert all(path.suffix.lower() == ".json" for path in paths)
+    assert all(load_scene(path).document_type == "galaxy.scene_card" for path in paths)

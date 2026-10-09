@@ -1,0 +1,31 @@
+{
+  "source_filename": "jw02739-o001_t001_nircam_clear-f090w_i2d.fits",
+  "source_bytes": 5415822720,
+  "source_sha256": "475f0a805c773db868194571d6289a14c9366cff2b00d472b85df1dfc5f5016d",
+  "crop_xy_zero_based_half_open": [
+    3694,
+    3762,
+    5993,
+    6060
+  ],
+  "native_shape": [
+    8582,
+    14340
+  ],
+  "core_xy_ds9_inclusive": [
+    3727,
+    3729,
+    6026,
+    6027
+  ],
+  "core_local_yx_zero_based": [
+    32,
+    32
+  ],
+  "core_shape": [
+    2,
+    3
+  ],
+  "fixture_sha256": "0769f9eb4b2660af4ea52410edafe0abc79a600db1f61da91f197745cedf777e",
+  "fixture_derivation": "Exact SCI/WHT/CON crop; celestial WCS sliced with Astropy. No source bytes or observations changed."
+}

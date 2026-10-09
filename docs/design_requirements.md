@@ -15,7 +15,11 @@ Supporting specifications:
 
 - [User flows](user_flows.md): five screens, transitions, and observable states (UF-01 through UF-05).
 - [Scene card storage schema](scene_card_schema.md): normative scene-card format and persistence rules.
+- [Selection guidance specification](selection_guidance_spec.md): candidate identity, selection modes, grouping, summaries, and concise explanation format.
+- [Selected-footprint viewport specification](viewport_framing_spec.md): FITS footprint geometry, fitted-canvas derivation, and warning thresholds.
+- [Image-processing architecture](image_processing_architecture.md): numerical image contracts, validity and coverage semantics, stage boundaries, and selected algorithm definitions.
 - [UI acceptance coverage](testing/ui_scene_coverage.md): planned acceptance scenarios and implementation gaps.
+- [Image-processing upgrade coverage](testing/processing_upgrade_coverage.md): P00 proposal and later processing-method traceability.
 - [Known gaps](compliance_status/known_gaps.md): unresolved implementation and specification work.
 
 Requirements take precedence over flows; the storage schema supplies field-level definitions referenced by REQ-CARD-001. Supporting documents must be updated together when a contract changes.
@@ -27,6 +31,8 @@ Requirements take precedence over flows; the storage schema supplies field-level
 | Discovery hint | A source-attributed suggestion of a target or sky region; archive availability is unverified. |
 | Scene | Target or region plus data selection, frame, and composition settings. |
 | Scene card | The canonical JSON project document, containing scene inputs, settings, selected source identities, and artifact records; optional associated files hold binary assets. |
+| Bundled example | A source-controlled scene-card JSON template stored under the project `examples/` directory. It is never an editable user scene. |
+| User copy | The materialized copy of a bundled example in the effective scene directory. The user copy and its associated asset root are ordinary user-owned scene data. |
 | Observation group | Products associated with one authoritative archive observation identity. Separate visits and identities remain separate; a shared target name does not merge them. |
 | Candidate product | An archive product eligible for user selection under discovery constraints. |
 | Draft | A structurally valid scene card with optional unfinished sections; specific actions are enabled only when their readiness checks pass. |
@@ -121,6 +127,14 @@ The system shall produce a deterministic total ordering of all candidate product
 #### REQ-DATA-009 Selection-State Consistency
 
 The system shall ensure that candidate selection fields are internally consistent. The final selection state shall reflect application of selection policy and user overrides.
+
+#### REQ-DATA-010 Candidate identity consolidation
+
+The system shall consolidate archive rows that identify the same downloadable product into one candidate before ranking, recommendation, persistence, or display.
+
+#### REQ-DATA-011 Candidate metadata conflict handling
+
+When consolidated archive rows disagree on metadata used for ranking or explanation, the system shall mark the affected field as conflicting and shall not silently present one conflicting value as authoritative.
 
 #### REQ-DISC-001 Multiple Discovery Entry Points
 
@@ -354,7 +368,7 @@ The tone section shall support persistence of user-adjusted presentation paramet
 
 #### REQ-PROJ-020 Tone Scope
 
-Tone parameters persisted in the scene card shall apply per output channel. Per-plane tone persistence is not required unless explicitly introduced by a future schema revision.
+Tone parameters persisted in the tone section shall apply per output channel after plane mapping. Per-plane display normalization shall be persisted separately in the mapping section as required by REQ-NORM-001 through REQ-NORM-006.
 
 #### REQ-PROJ-021 Execution Policy Separation
 
@@ -438,7 +452,7 @@ Each successful render record shall retain the effective scene input snapshot us
 
 #### REQ-CARD-013 Scene-owned artifact layout
 
-Scene-owned source, processing, render, thumbnail, and retained-export artifacts shall use the directories and filenames defined by [Artifact storage specification, revision 1](artifact_storage_spec.md).
+Scene-owned source, processing, render, thumbnail, and retained-export artifacts shall use the directories and filenames defined by [Artifact storage specification, revision 3](artifact_storage_spec.md).
 
 #### REQ-CARD-014 Cache separation
 
@@ -451,6 +465,20 @@ Artifact lookup and history shall use scene-card or authoritative archive identi
 #### REQ-CARD-016 External export isolation
 
 An external user-selected export destination shall remain separate from scene-owned render artifacts and shall not be modified merely by reopening a scene card.
+
+#### REQ-CARD-017 Bounded asset verification
+
+Local asset byte-count and checksum verification shall use bounded-memory streaming so that verification memory does not scale with source FITS file size.
+
+#### REQ-CARD-018 Render-private scratch placement
+
+Canonical scene execution shall place transient acquisition and processing scratch
+below the current dedicated per-render working directory.
+
+#### REQ-CARD-019 Scratch registration boundary
+
+The system shall not register transient scratch as a portable scene asset or a
+retained successful render output.
 
 ### Scene-card execution
 
@@ -525,6 +553,18 @@ Each candidate record shall include defined metadata fields including identifier
 
 The manifest shall include generation time, scene card reference, selection policy, and selection inputs.
 
+#### REQ-MAN-004 Unique candidate identity
+
+A candidate manifest shall contain no more than one candidate record for each authoritative downloadable product identity defined by the selection guidance specification.
+
+#### REQ-MAN-005 Scene query association
+
+After a successful archive query, the active scene draft shall reference the persisted candidate manifest without requiring the user to apply a product recommendation.
+
+#### REQ-MAN-006 Query-state restoration
+
+Reopening a saved draft with an available referenced candidate manifest shall restore the candidate set, recommendation state, and retrieval metadata represented by that manifest without issuing a new archive query.
+
 ### Execution provenance
 
 #### REQ-REPRO-001 Provenance Content
@@ -554,6 +594,11 @@ The system shall treat persisted discovery results older than 6 months as stale 
 #### REQ-CACHE-004 Forced Refresh
 
 The system shall allow users to force a new archive query.
+
+#### REQ-CACHE-005 Discovery cache placement
+
+The system shall store newly written discovery-cache entries below
+`<scene-directory>/.galaxy-cache/candidates/`.
 
 ## 5. User interface behavior
 
@@ -702,7 +747,7 @@ Refinement shall display the scene card's configured canvas as the initial crop 
 
 #### REQ-REFINE-012 Initial canvas
 
-For a new scene without a configured canvas, refinement shall initialize a TAN canvas centered on the resolved target, enclosing the search region at 1 arcsecond per pixel and zero rotation.
+For a new scene without a configured canvas, refinement shall initialize a provisional TAN canvas centered on the resolved target, enclosing the search region at 1 arcsecond per pixel and zero rotation until selected FITS footprints are available.
 
 #### REQ-REFINE-013 Frame editing
 
@@ -727,6 +772,108 @@ Refinement shall allow saving any structurally valid incomplete scene card as de
 #### REQ-REFINE-018 Frame preservation
 
 Changing observation or filter selections shall retain the current crop frame until the user explicitly edits or resets it.
+
+#### REQ-REFINE-019 Selection summary
+
+Refinement shall display the selection summary defined by the selection guidance specification for the current proposed selection before application and for the current applied selection after application.
+
+#### REQ-REFINE-020 Unique summary counting
+
+Selection summary counts and download-size estimates shall count each authoritative downloadable product identity no more than once.
+
+#### REQ-REFINE-021 Selection modes
+
+Refinement shall offer the `preview_set`, `one_per_filter`, and `custom` selection modes defined by the selection guidance specification.
+
+#### REQ-REFINE-022 Selection scope
+
+Refinement shall allow the user to constrain a recommendation to all available missions, HST, or JWST before applying it.
+
+#### REQ-REFINE-023 Grouped candidate presentation
+
+Refinement shall group candidates by mission, instrument, and normalized filter before displaying individual product alternatives.
+
+#### REQ-REFINE-024 Recommended-row prominence
+
+Each candidate group shall show its recommended product without requiring the user to expand the group's alternatives.
+
+#### REQ-REFINE-025 Alternative disclosure
+
+Nonrecommended products shall remain inspectable through an explicit alternatives control that displays the number of alternatives in the group.
+
+#### REQ-REFINE-026 Concise recommendation explanation
+
+Each displayed recommendation shall use the concise explanation format defined by the selection guidance specification and shall not expose internal reason codes as the primary user-facing explanation.
+
+#### REQ-REFINE-027 Selection consequence labeling
+
+Refinement shall identify whether the current recommendation is a bounded preview set, a full-filter set, or a custom selection.
+
+#### REQ-REFINE-028 Explicit recommendation application
+
+Changing a selection mode or scope shall update the proposed selection but shall not modify the scene card's applied product selection until the user invokes an explicit apply action.
+
+#### REQ-REFINE-029 Selection reset controls
+
+Refinement shall provide controls to clear the proposed selection and to restore the current mode's deterministic recommendation.
+
+#### REQ-REFINE-030 Stage guidance
+
+Before a product recommendation has been applied, Refinement shall present a concise ordered checklist for choosing data, applying the selection, reviewing color and frame, and rendering.
+
+#### REQ-REFINE-031 Readiness summary
+
+When Render is disabled, Refinement shall present unmet readiness conditions as user actions grouped by workflow stage.
+
+#### REQ-REFINE-032 Technical readiness disclosure
+
+Field paths and schema-level readiness diagnostics shall be hidden by default and available through a separately labeled technical-details disclosure.
+
+#### REQ-REFINE-033 Initial selected-footprint fit
+
+Before the first render of a new scene, after the selected and enabled FITS products are locally inspectable, Refinement shall replace the provisional search-region canvas with the fitted canvas defined by REQ-WCS-009 through REQ-WCS-016 when that fit has no geometric warning; a warned fit shall require the choice defined by REQ-REFINE-038.
+
+#### REQ-REFINE-034 Fit selected scans action
+
+Refinement shall provide a `Fit selected scans` action that recomputes the canvas from the current selected and enabled FITS products.
+
+#### REQ-REFINE-035 Fit preview
+
+Before applying a fitted canvas, Refinement shall display its center, angular width, angular height, rotation, pixel scale, raster dimensions, selected-product count, and geometric warning state.
+
+#### REQ-REFINE-036 Explicit fit acceptance
+
+Outside the automatic first-render initialization in REQ-REFINE-033, applying a fitted canvas shall require a user action.
+
+#### REQ-REFINE-037 User-frame preservation
+
+Changing selected products after a user has edited or accepted a canvas shall retain that canvas and shall identify each newly selected footprint that is not fully enclosed until the user invokes `Fit selected scans` or edits the frame.
+
+#### REQ-REFINE-038 Geometric warning choices
+
+When selected footprints meet a warning condition from REQ-WCS-014, Refinement shall offer the choices to revise the selection, continue with the fitted canvas, or keep the current canvas; it shall not silently create an extreme frame.
+
+#### REQ-REFINE-039 Unusable footprint reporting
+
+If any selected and enabled FITS product lacks a usable two-dimensional celestial footprint, automatic fitting shall stop and identify every affected product without claiming that the proposed canvas encloses all selected scans.
+
+#### REQ-REFINE-040 Geometric fit visualization
+
+Before a fitted canvas is applied, Refinement shall display an image of every
+selected valid-support boundary projected into the proposed canvas together with
+the proposed canvas border. A footprint overlay from an earlier render shall not
+be presented as current when that render's canvas inputs differ from the active
+canvas.
+
+#### REQ-REFINE-041 Applied-selection reconciliation
+
+When the user invokes `Apply selection and recommended defaults`, the system shall
+preserve valid local source-asset references for unchanged product identities,
+replace selection-dependent mapping and processing settings with deterministic
+defaults for exactly the newly selected filters, remove references to unselected
+filters or planes, retain the accepted canvas, and leave the resulting scene at a
+renderable readiness state unless an independently reported frame, dependency, or
+input problem remains.
 
 ### Render and adjust behavior — UF-03
 
@@ -820,7 +967,13 @@ Opening a saved scene shall restore its persisted scene definition into Scene re
 
 #### REQ-LIB-004 Duplicate
 
-Duplicating a saved scene shall create an independently editable draft with a new scene identifier.
+Duplicating a user-owned saved scene shall create a committed, independently
+editable scene with a new scene identifier, content revision one, no render or
+export history, and independently addressable retained input assets. Immutable
+local input bytes may use same-volume hard links inside the new scene's asset root;
+if linking is unavailable, duplication shall use a bounded-memory verified copy.
+Deleting either scene shall not remove the other scene's input path. A missing or
+invalid source asset shall fail duplication without publishing the new scene card.
 
 #### REQ-LIB-005 Missing dependencies
 
@@ -832,7 +985,7 @@ An invalid scene card shall be reported individually without preventing valid li
 
 #### REQ-LIB-007 Bundled example discovery
 
-The project selector shall discover registered bundled example scene cards independently of the configured user scene directory.
+The project selector shall discover valid bundled example scene cards from the source-controlled `<project-root>/examples/` directory independently of the configured user scene directory.
 
 #### REQ-LIB-008 Scene origin label
 
@@ -840,15 +993,128 @@ The project selector shall label each bundled example separately from user-owned
 
 #### REQ-LIB-009 Bundled example protection
 
-An ordinary save operation shall not overwrite a bundled example scene card.
+The system shall not open a bundled example scene card as an editable scene or write changes to its source-controlled file.
 
-#### REQ-LIB-010 Bundled example save-as
+#### REQ-LIB-010 Example-copy destination
 
-Saving changes made after opening a bundled example shall create a user-owned scene with a new scene identifier in the configured user scene directory.
+The destination for a bundled example's user copy shall be the effective scene directory joined to the bundled example's exact filename, including filename casing.
 
 #### REQ-LIB-011 Platform path deduplication
 
 The project selector shall not display duplicate entries for filesystem paths that are equivalent under the active platform's path-casing rules.
+
+#### REQ-LIB-012 Example-directory contents
+
+The source-controlled `<project-root>/examples/` directory shall contain only UTF-8 JSON scene cards and shall not contain binary assets, thumbnails, caches, generated outputs, or non-JSON documentation.
+
+#### REQ-LIB-013 Example duplication
+
+When no destination file exists, Duplicate on a bundled example shall atomically copy the validated example JSON to the destination defined by REQ-LIB-010 without creating or copying a binary asset root.
+
+#### REQ-LIB-014 Example overwrite confirmation
+
+When the destination file already exists, Duplicate on a bundled example shall require explicit user confirmation before replacing that JSON file, and declining confirmation shall leave user data unchanged.
+
+#### REQ-LIB-015 Example overwrite scope
+
+Confirmed replacement of an existing example user copy shall replace only the destination JSON file and shall retain the matching user-owned binary asset root and all of its contents unchanged.
+
+#### REQ-LIB-016 Example open resolution
+
+Open on a bundled example shall open the existing user-copy destination when it exists; otherwise it shall perform the non-colliding duplication behavior in REQ-LIB-013 and then open the resulting user copy.
+
+#### REQ-LIB-017 Example thumbnail source
+
+The project selector shall display a bundled example's thumbnail only from the valid existing user copy and its referenced user-owned assets; when no usable user-copy thumbnail exists, it shall display a placeholder.
+
+#### REQ-LIB-018 User-copy editing
+
+After Open or Duplicate materializes a bundled example, all edits, saves, renders, downloads, and generated binary assets shall target the user copy and its associated user-owned asset root.
+
+#### REQ-LIB-019 Example identity preservation
+
+Materializing or replacing a bundled example user copy shall preserve the scene identifier stored in the bundled example JSON rather than minting a new identifier.
+
+#### REQ-LIB-020 User-project deletion
+
+Saved scenes shall provide a Delete action for each user-owned stored scene.
+
+#### REQ-LIB-021 Bundled example deletion protection
+
+The project selector shall not provide a Delete action for a source-controlled bundled example.
+
+#### REQ-LIB-022 Deletion confirmation
+
+Deleting a user-owned scene shall require explicit confirmation that identifies the scene title, scene-card path, and associated asset root before any filesystem change occurs.
+
+#### REQ-LIB-023 Deletion scope
+
+Confirmed deletion shall affect only the selected scene-card JSON and its associated asset root as defined by the artifact storage specification; it shall not delete application-cache entries, external exports, bundled examples, or another scene's files.
+
+#### REQ-LIB-024 Recoverable deletion transaction
+
+The normal Delete action shall move the selected scene card and its associated asset root as one recoverable unit; if both members cannot be moved, the system shall restore any moved member and report failure.
+
+#### REQ-LIB-025 Active-operation guard
+
+The system shall not begin deletion while a save, acquisition, render, or export operation associated with the selected scene is running.
+
+#### REQ-LIB-026 Deletion outcome
+
+After successful deletion, the system shall remove the scene from Saved scenes, close it if active, and display completion; cancellation or failure shall retain the active scene and refresh the library from the resulting filesystem state without reporting success.
+
+#### REQ-LIB-027 Clone display title
+
+Duplicating a user-owned scene shall set the new scene card's initial display title
+to the source display title followed by ` copy`.
+
+#### REQ-LIB-028 Clone storage name
+
+The default JSON filename and associated asset-root name for a duplicated
+user-owned scene shall derive their title slug from the source display title before
+the ` copy` suffix required by REQ-LIB-027 is added, and shall use the duplicate's
+new scene-ID prefix. The cloning operation shall not add its generated `copy` label
+to either storage name.
+
+#### REQ-LIB-029 Inline title-edit affordance
+
+Each user-owned entry in Saved scenes shall present its displayed title as an
+in-place rename affordance that can be activated by pointer or keyboard without
+opening or editing the JSON file manually. Bundled-example source entries shall not
+offer this edit affordance.
+
+#### REQ-LIB-030 Inline title-edit state
+
+Activating the rename affordance shall replace the displayed title in the same
+card position with a focused single-line input prefilled with the complete current
+title and explicit Commit and Cancel actions.
+
+#### REQ-LIB-031 Inline title commit
+
+Commit shall validate the proposed title under the scene-card title contract,
+atomically persist the accepted title, update the Saved scenes card and any active
+view of the same scene, and report success without requiring navigation away from
+Saved scenes.
+
+#### REQ-LIB-032 Inline title cancellation and failure
+
+Cancel shall restore the unchanged displayed title. An empty, invalid, conflicting,
+or failed title save shall retain the prior persisted title and storage paths and
+shall display an actionable error adjacent to the affected card.
+
+#### REQ-LIB-033 Title-edit identity and history preservation
+
+Renaming a display title shall preserve the scene identifier, content revision,
+JSON path, associated asset-root path, selected products, assets, renders, exports,
+and current/stale render classification. Only title and save timestamp metadata may
+change.
+
+#### REQ-LIB-034 Title-edit operation guard
+
+The Saved scenes rename affordance shall be unavailable while another write
+operation for that scene is running, and simultaneous rename attempts shall use
+the ordinary concurrent-save protection rather than silently overwriting a newer
+scene document.
 
 ### Scene artifact inventory
 
@@ -908,6 +1174,55 @@ The system shall apply explicit include and exclude selection overrides after ra
 
 The system shall record final selected candidates in both the candidate manifest and provenance record.
 
+#### REQ-SELECT-006 Parent-observation product grouping
+
+The system shall group an archive product by its authoritative parent observation
+identifier and filter when that parent identifier is available, rather than
+treating each detector or exposure product identifier as a separate observation.
+
+#### REQ-SELECT-007 Combined-image preference
+
+Within one parent observation and filter, automatic presentation-image selection
+shall prefer an image-like Level-3 combined or association product over a
+detector-level or exposure-level component product. An explicit product include or
+user selection may override this recommendation.
+
+#### REQ-SELECT-008 Unknown-depth semantics
+
+For `deepest_per_filter`, a candidate with a known finite exposure duration shall
+rank ahead of a candidate whose exposure duration is unknown. Candidates whose
+durations are both unknown shall be ordered by the applicable product-role and
+deterministic ranking rules and shall not be described as shallower based on the
+missing duration.
+
+#### REQ-SELECT-009 Unique selection identity
+
+Automatic and user-modified selections shall contain each authoritative downloadable product identity no more than once.
+
+#### REQ-SELECT-010 Preview-set policy
+
+The `preview_set` mode shall recommend no more than three unique products and no more than one product for each normalized mission, instrument, and filter group.
+
+#### REQ-SELECT-011 Full-filter policy
+
+The `one_per_filter` mode shall recommend no more than one unique product for each normalized mission, instrument, and filter group within the selected mission scope and shall be presented as a full-filter set.
+
+#### REQ-SELECT-012 Custom-selection policy
+
+The `custom` mode shall preserve explicit user includes and excludes without adding automatic selections after the user begins editing the proposed selection.
+
+#### REQ-SELECT-013 Selection-mode determinism
+
+For identical normalized candidates, selection mode, mission scope, and explicit overrides, the system shall produce the same ordered recommendation.
+
+#### REQ-SELECT-014 Recommendation explanation facts
+
+The system shall derive recommendation explanations only from normalized candidate metadata, configured selection policy, crop-overlap measurements when available, and explicit user constraints.
+
+#### REQ-SELECT-015 Download-size estimate
+
+The system shall calculate estimated download size as the sum of known byte sizes for unique selected product identities and shall report selected products whose sizes are unknown separately.
+
 ### FITS ingestion
 
 #### REQ-INPUT-001 FITS Loading
@@ -935,6 +1250,57 @@ The system shall load all usable FITS planes prior to reprojection.
 #### REQ-WCS-004 Reprojection Mode Recording
 
 The system shall record reprojection mode in provenance.
+
+#### REQ-WCS-005 Viewport-change invalidation
+
+A change to canvas center, projection, pixel scale, dimensions, or rotation shall mark reprojection artifacts made for the previous canvas as stale for the current scene state.
+
+#### REQ-WCS-006 Stale reprojection replacement
+
+The system may overwrite or replace a stale reprojection artifact in the user-owned asset root when that artifact is not referenced by a retained successful render record in the current scene card.
+
+#### REQ-WCS-007 Reprojection overwrite boundary
+
+Reprojection replacement shall not overwrite downloaded source products or artifacts referenced by a retained successful render record.
+
+#### REQ-WCS-008 Selected-plane overlap validation
+
+Before composition, the system shall verify that every selected and enabled FITS
+plane has nonzero measured footprint coverage on the configured output canvas. If
+any plane has zero coverage, execution shall stop and identify each non-overlapping
+source product; it shall not silently produce a composite that omits those planes.
+
+#### REQ-WCS-009 Selected FITS footprint derivation
+
+The system shall derive one celestial footprint for each selected and enabled FITS image from its two-dimensional celestial WCS and valid image support according to the selected-footprint viewport specification.
+
+#### REQ-WCS-010 Spherical footprint union
+
+The system shall combine selected footprints on the celestial sphere without treating right-ascension wraparound as a discontinuity.
+
+#### REQ-WCS-011 Tight fitted orientation
+
+The system shall project the footprint union onto a feasible local tangent plane and use the deterministic minimum-area enclosing rectangle defined by the selected-footprint viewport specification; no fixed north-up or instrument-aligned rotation is required.
+
+#### REQ-WCS-012 Fitted-frame containment
+
+The fitted canvas shall contain every derived selected footprint plus the specified padding on each side after integer raster dimensions are rounded upward.
+
+#### REQ-WCS-013 Initial preview scale
+
+The fitted initial canvas shall use a pixel scale no finer than the finest selected input scale and shall coarsen that scale as necessary to remain within the initial-preview raster limit defined by the selected-footprint viewport specification.
+
+#### REQ-WCS-014 Geometric relationship warning
+
+The system shall classify a fitted selection as geometrically suspicious when its footprints satisfy any disconnectedness, low-fill, excessive-separation, or absolute-span threshold in the selected-footprint viewport specification.
+
+#### REQ-WCS-015 Framing diagnostics
+
+The system shall report footprint-component count, total angular span, fitted-frame angular dimensions, footprint fill fraction, raster dimensions, and estimated memory whenever it presents a geometric relationship warning.
+
+#### REQ-WCS-016 Tangent-plane feasibility
+
+When the selected footprint union cannot be represented safely by one TAN canvas under the selected-footprint viewport specification, the system shall refuse automatic fitting and recommend revising the selection or creating separate scenes.
 
 #### REQ-PERF-004 Memory Estimate Definition
 
@@ -983,9 +1349,200 @@ When the system exports an aligned plane set as a stacked artifact, it shall use
 
 The system shall combine planes into RGB outputs using scene card mapping settings.
 
+#### REQ-FITS-001 Native Unit Metadata
+
+The system shall read each image plane's native `BUNIT` value when present and shall preserve that value through reprojection, aligned-plane export, provenance, and plane inventory reporting.
+
+#### REQ-FITS-002 Validity Mask Sources
+
+The FITS loader shall mark a science pixel invalid when a same-shape `DQ` value is nonzero, a same-shape `WHT` value is nonfinite or not greater than zero, or every applicable `CTX` sample is zero.
+
+#### REQ-FITS-003 Validity Propagation
+
+Invalid source pixels shall not contribute observed science values, observational coverage, or observation contribution diagnostics. Explicitly identified presentation estimates produced under REQ-BRIDGE-001 through REQ-BRIDGE-014 may contribute to presentation reprojection, display-normalization statistics, and RGB composition; they shall not be represented as observed samples.
+
+#### REQ-FITS-004 Mask Provenance
+
+The system shall record the FITS extensions used to construct each plane's validity mask and the valid coverage fraction after reprojection.
+
+#### REQ-IMG-001 Required image validity
+
+Every numerical image-stage input shall include an explicit boolean validity array
+with the same raster shape, using the `True`-means-usable convention defined by
+IMG-CONTRACT-001 and MASK-001 in the image-processing architecture.
+
+#### REQ-IMG-002 Separate geometric coverage
+
+Every numerical image-stage input shall include finite geometric coverage in
+`[0,1]` separately from sample validity, and processing shall not interpret that
+coverage as inverse variance or statistical weight.
+
+#### REQ-IMG-003 Explicit processing domain
+
+Every numerical image-stage input and output shall identify its processing domain
+as defined by IMG-CONTRACT-001, and a stage shall reject an unsupported domain.
+
+#### REQ-IMG-004 Aligned geometry identity
+
+Every aligned numerical image-stage input and output shall carry its WCS, raster
+shape, and stable grid identity; same-grid operations shall reject geometrically
+incompatible operands according to IMG-CONTRACT-001.
+
+#### REQ-IMG-005 Stage input ownership
+
+A numerical processing stage shall not modify the values, validity, or coverage
+arrays supplied by its caller.
+
+#### REQ-IMG-006 Boundary validation
+
+Numerical image packages shall be validated at processing boundaries for array
+shape, finite usable values, coverage range, declared domain, and geometry as
+specified by IMG-CONTRACT-001 and NUM-001.
+
+#### REQ-DERIVED-001 Derived-plane support
+
+A derived linear-combination or ratio plane shall carry validity and coverage
+computed from every nonzero-weight operand by ARITH-001 and shall preserve the
+common coordinate identity.
+
+#### REQ-DERIVED-002 Singular ratio policy
+
+A ratio result shall mark a sample invalid when its numerator or denominator lacks
+support or when the absolute denominator does not exceed the persisted positive
+threshold; adding an epsilon shall not make that sample valid.
+
+#### REQ-NORM-001 Persisted Per-Plane Policy
+
+The mapping section shall support a default display-normalization policy and an optional override on each explicit plane or filter mapping.
+
+#### REQ-NORM-002 Normalization Modes
+
+The system shall support `native` normalization and `percentile` display normalization. Omitted revision-one normalization settings shall resolve to `native` for backward compatibility.
+
+#### REQ-NORM-003 Percentile Normalization
+
+Percentile normalization shall calculate persisted black and white percentiles from finite valid pixels only, subtract the resulting black point, divide by the positive black-to-white interval, clip to `[0,1]`, apply the configured per-plane stretch, and then apply the configured nonnegative plane gain.
+
+#### REQ-NORM-004 Processing Order
+
+The system shall apply source validity masking and per-plane display normalization before RGB mapping weights, and shall apply output-channel tone processing after RGB composition.
+
+#### REQ-NORM-005 Reproducible Diagnostics
+
+Each composed plane shall record its effective normalization mode, native unit, black point, white point, gain, valid coverage fraction, and percentage contribution to every RGB channel.
+
+#### REQ-NORM-006 Native Unit Warning
+
+When enabled mapped planes contain more than one known native unit and any such plane uses `native` normalization, the system shall present a nonblocking warning that direct native-unit mixing can suppress planes.
+
+#### REQ-NORM-007 New-Scene Display-Normalization Default
+
+When render defaults are materialized for a scene that has no explicit plane
+mapping, the system shall persist percentile display normalization with black
+percentile `0.5`, white percentile `99.5`, an `asinh` stretch parameter of `4.0`,
+and gain `1.0`. Loading an older revision-one scene that omits normalization shall
+continue to resolve to `native` normalization as required by REQ-NORM-002.
+
+#### REQ-NORM-008 Coverage-Aware Output Tone Statistics
+
+Output-channel black and white percentiles shall be calculated only from finite
+pixels supported by at least one valid contributing plane for that channel.
+Pixels without valid contributing coverage shall remain zero after output tone
+processing.
+
+#### REQ-INV-001 Plane Inventory Fields
+
+The plane inventory shall display mission, filter, processing level, product identity, filename, availability status, native unit, mask sources, normalization mode, black percentile, white percentile, plane gain, valid coverage, and RGB contribution.
+
+#### REQ-INV-002 Unknown Inventory Values
+
+Inventory values that cannot be determined before a successful render shall be displayed as `unknown` rather than inferred.
+
+#### REQ-INV-003 Contribution Units
+
+Plane RGB contribution shall be displayed as a percentage of the total absolute weighted signal in each output channel for the successful render.
+
+#### REQ-INV-004 Warning Placement
+
+Native-unit compatibility warnings shall be displayed adjacent to the source-plane inventory and shall not prevent inspection or editing.
+
 #### REQ-TONE-001 Tone Processing
 
 The system shall apply tone transformations using scene card tone settings.
+
+#### REQ-TONE-002 Legacy Tone Compatibility
+
+A tone section that omits an application mode, shared stretch, gamut policy, and
+auto-stretch resolution shall retain the revision-one independent per-channel
+tone result within the frozen legacy tolerance.
+
+#### REQ-TONE-003 Shared-Intensity Application
+
+When shared-intensity tone is selected, the system shall calculate
+`L=(R+G+B)/3`, apply the selected monotone curve `T` to `L`, and multiply every
+supported channel at that pixel by the same `T(L)/L` factor when `L` exceeds the
+documented epsilon.
+
+#### REQ-TONE-004 Shared-Intensity Domain
+
+Shared-intensity tone shall reject a supported RGB sample containing a negative
+channel after normalization, gain, and bias; an exactly zero intensity shall
+produce zero without division by epsilon.
+
+#### REQ-TONE-005 Gamut Policy
+
+Shared-intensity tone shall provide explicit `clip` and per-pixel `rescale` gamut
+policies. Ratio preservation may be claimed only before gamut handling and after
+`rescale`, not after channel clipping.
+
+#### REQ-TONE-006 Generalized Hyperbolic Stretch
+
+The `ghs` method shall implement the forward generalized-hyperbolic construction
+specified by TONE-GHS-001 using float64 intermediates and shall not copy GPL
+implementation source.
+
+#### REQ-TONE-007 GHS Parameter Validation
+
+GHS shall require a stretch factor in `[0,20]`, local intensity in `[-5,15]`, and
+`0 <= shadow_protection <= symmetry_point <= highlight_protection <= 1`.
+
+#### REQ-TONE-008 GHS Identity and Continuity
+
+A zero GHS stretch factor shall be the identity; every accepted GHS parameter set
+shall produce finite, endpoint-normalized, monotone output continuous at the
+shadow-protection, symmetry, and highlight-protection boundaries.
+
+#### REQ-TONE-009 Auto-Stretch Proposal Source
+
+An auto-stretch proposal shall use only finite shared-intensity samples selected
+by persisted background inclusion and exclusion regions on the current branch and
+grid, and shall report its reference identity and sample count.
+
+#### REQ-TONE-010 Auto-Stretch Failure
+
+Auto-stretch shall fail without fallback when the persisted sample is missing,
+insufficient, constant, nonpositive at its resolved median, already above the
+target placement, or classified as object-dominated by AUTOSTRETCH-001.
+
+#### REQ-TONE-011 Auto-Stretch Apply and Recompute
+
+Auto-stretch shall return a deterministic proposal containing requested targets,
+resolved numerical settings, confidence diagnostics, and clipping estimates;
+only explicit Apply shall change the scene, and Recompute shall create a new
+proposal without changing the scene until applied.
+
+#### REQ-TONE-012 Tone Controls and Persistence
+
+The Render interface shall expose application mode, stretch method, applicable
+method parameters, gamut policy, proposal diagnostics, Preview, Apply, Recompute,
+and an identity/legacy choice. Applied values shall save, reopen, enter effective
+render inputs and provenance, and make prior renders stale.
+
+#### REQ-TONE-013 Single-Main-Stretch Preset
+
+The interface shall provide an explicit single-main-stretch action that changes
+per-plane display stretches to linear while selecting shared-intensity tone; it
+shall not silently modify existing recipes.
 
 ### PSF processing
 
@@ -1025,6 +1582,149 @@ When both original and PSF-processed branches are present, the system shall gene
 
 The system shall apply Richardson-Lucy deconvolution for the PSF-processed branch.
 
+#### REQ-PSF-010 Validity-aware deconvolution
+
+Richardson-Lucy processing shall exclude invalid observations from its forward
+comparison and correction update according to PSF-RL-001, so changing finite
+values underneath an invalid mask does not change valid output values.
+
+#### REQ-PSF-011 Angular kernel sampling
+
+A Gaussian PSF width expressed in angular units shall be converted to the native
+pixel geometry according to PSF-GAUSS-001 before deconvolution; unsupported or
+degenerate sampling geometry shall fail explicitly.
+
+#### REQ-PSF-012 Signed-input policy
+
+Richardson-Lucy processing shall reject a plane containing valid negative samples
+with an actionable diagnostic and shall not silently clip those observations into
+the nonnegative algorithm domain.
+
+### Presentation bridging during reprojection
+
+The [Native NaN bridge algorithm](reprojection_bridge_algorithm.md) defines
+BRIDGE-MEDIAN-001, its eligibility profile, estimation method, support contracts
+and acceptance cases for REQ-BRIDGE-001 through REQ-BRIDGE-021.
+
+#### REQ-BRIDGE-001 Processing location
+
+When a selected source FITS plane is loaded for full or reproject-only processing,
+the system shall automatically bridge eligible native-frame missing-data clusters
+in a separate presentation working copy when bridging is enabled. Preparation
+shall follow science-data and archive-mask ingestion and precede original-branch
+resampling onto the output grid.
+
+#### REQ-BRIDGE-002 Default
+
+The missing-data bridge shall be enabled by default when the setting is absent,
+including for existing scene documents.
+
+#### REQ-BRIDGE-003 Strict opt-out
+
+When bridging is disabled, the system shall reproduce the existing strict
+invalid-sample reprojection path without estimating missing values.
+
+#### REQ-BRIDGE-004 Explicit control
+
+The scene editor shall expose a two-state switch labelled "Bridge small NaN holes"
+whose boolean saved value reaches both original and PSF-processed reprojection
+branches. The switch shall display the effective default when the value is absent.
+
+#### REQ-BRIDGE-005 Candidate mask
+
+The candidate mask shall include samples invalid under REQ-FITS-002 and nonfinite
+SCI samples; finite zero SCI samples with valid support shall not be candidates.
+
+#### REQ-BRIDGE-006 Exterior exclusion
+
+A candidate cluster connected to any native-image border through eight-connected
+invalid samples shall remain unbridged.
+
+#### REQ-BRIDGE-007 Bounded size
+
+Eligibility shall require cluster area and maximum bounding-box extent to remain
+within explicit configured positive limits expressed in native pixels.
+
+#### REQ-BRIDGE-008 Local stellar evidence
+
+Eligibility shall require valid neighboring samples to satisfy a deterministic,
+versioned bright-core test with explicit thresholds independent of RGB mapping
+and display stretch, as defined by BRIDGE-EVIDENCE-001 in the
+[Native NaN bridge algorithm](reprojection_bridge_algorithm.md).
+
+#### REQ-BRIDGE-009 Neighbor estimates
+
+Eligible clusters shall receive finite estimates computed only from valid native
+samples in a bounded local neighborhood using BRIDGE-FILL-001 in the
+[Native NaN bridge algorithm](reprojection_bridge_algorithm.md).
+
+#### REQ-BRIDGE-010 Rejection behavior
+
+Clusters failing any eligibility criterion or lacking sufficient valid estimation
+support shall retain strict invalid-sample handling.
+
+#### REQ-BRIDGE-011 Source preservation
+
+Bridging shall not modify archived FITS bytes or the ingested observation values
+and validity masks.
+
+#### REQ-BRIDGE-012 Estimate identity
+
+Aligned artifacts shall distinguish observational support from presentation
+support and retain a mask identifying output samples influenced by bridge
+estimates, including influence through the resampling kernel.
+
+#### REQ-BRIDGE-013 Reproducibility
+
+Bridge enablement, thresholds, estimation method, algorithm version, candidate and
+accepted cluster counts, and estimated-sample counts shall be recorded in render
+provenance and incorporated into reprojection checkpoint identity.
+
+#### REQ-BRIDGE-014 Performance accounting
+
+The reprojection memory estimate shall include bridge working arrays, and bridge
+elapsed time and peak-memory estimates shall be reported for benchmark fixtures.
+
+#### REQ-BRIDGE-015 Branch isolation
+
+Native PSF processing shall consume unchanged observation values and validity;
+its output shall receive independent bridge preparation before reprojection.
+
+#### REQ-BRIDGE-016 Persistence
+
+Save, reopen, and duplicate shall preserve an explicitly selected bridge state.
+Successful render history shall retain the effective state used by that render.
+
+#### REQ-BRIDGE-017 Setting changes
+
+Changing bridge state shall mark the current aligned result stale for the requested
+settings and require full or reproject-only processing before generating a new
+current preview or export. Historical results shall retain their recorded settings.
+
+#### REQ-BRIDGE-018 Compose-only reuse
+
+Compose-only processing shall reuse certified aligned bridge artifacts without
+rerunning native bridging and reject checkpoints whose bridge settings, algorithm
+version, or required support/influence artifacts do not match.
+
+#### REQ-BRIDGE-019 Control explanation
+
+The switch shall explain that On estimates eligible small enclosed bright-core
+holes for presentation, Off preserves strict missing data, and changing the setting
+requires reprojection. It shall not imply that every NaN is repaired.
+
+#### REQ-BRIDGE-020 Execution snapshot
+
+A running render shall use a fixed snapshot of bridge settings; the switch shall
+be disabled while that scene has an active render operation.
+
+#### REQ-BRIDGE-021 Preparation failure
+
+An unexpected bridge preparation or numerical solver failure shall fail the render
+with the source plane and reason identified, without publishing a successful result
+or silently substituting strict processing. Eligibility rejection is a normal
+recorded outcome rather than a preparation failure.
+
 ### Export artifacts
 
 #### REQ-OUT-001 Output Formats
@@ -1042,6 +1742,21 @@ In the footprint overlay artifact, source-image boundaries shall be rendered as 
 #### REQ-OUT-004 Reprojected Footprint Overlay Purpose
 
 The footprint overlay artifact shall be intended for human inspection of how the selected archive assets map onto the configured output rectangle.
+
+#### REQ-OUT-005 High-depth TIFF selection
+
+An external TIFF export shall copy the matching successful render branch's
+registered uint16 TIFF artifact and shall not transcode the preview PNG.
+
+#### REQ-OUT-006 Explicit export branch
+
+An external image export shall require an `original` or `deconvolved` branch and
+shall select the matching current render and requested format role for that branch.
+
+#### REQ-OUT-007 Missing output role
+
+External export shall fail with an actionable error when the requested branch does
+not register the requested output role.
 
 ## 7. Architecture and execution interfaces
 
@@ -1069,6 +1784,211 @@ Each pipeline stage shall operate only on inputs produced by prior stages and sh
 #### REQ-ARCH-003 Tooling Compatibility
 
 The system shall support debugger and launcher environments in which module-level argument forwarding is unreliable, without changing UI mode semantics.
+
+### Processing checkpoints
+
+#### REQ-CHK-001 Versioned aligned checkpoint
+
+Every reusable aligned-plane FITS artifact shall have a versioned companion
+manifest conforming to `docs/processing_checkpoint_spec.md`.
+
+#### REQ-CHK-002 Producer dependency identity
+
+A checkpoint shall be reused only when the SHA-256 key of its canonical numerical
+producer inputs matches the requested upstream source, validity, branch, native
+processing, canvas and reprojection inputs.
+
+#### REQ-CHK-003 Downstream-setting exclusion
+
+Mapping, display normalization, RGB tone, logging and output encoding settings
+shall not invalidate an otherwise compatible aligned checkpoint.
+
+#### REQ-CHK-004 Output integrity
+
+A checkpoint shall be reused only after the companion FITS byte count and SHA-256
+match the manifest and the loaded plane/grid summaries match the manifest.
+
+#### REQ-CHK-005 Strict compose-only behavior
+
+Compose-only execution shall reject a missing, legacy, corrupt or incompatible
+checkpoint and shall not silently rebuild upstream processing.
+
+#### REQ-CHK-006 Legacy inspection boundary
+
+A legacy multi-plane FITS artifact without a checkpoint manifest may be inspected
+through the explicit adapter but shall not be certified for compose-only reuse.
+
+#### REQ-CHK-007 Algorithm version identity
+
+Checkpoint producer inputs and stage records shall use stable algorithm
+implementation versions rather than the application version or timestamps.
+
+#### REQ-CHK-008 Atomic publication
+
+A checkpoint manifest shall become reusable only after its FITS output is complete,
+and failure or cancellation shall not register it as a successful scene asset.
+
+#### REQ-RENDER-010 Shared numerical render core
+
+Scene composition and direct aligned-stack preview shall use the same numerical
+composition and tone function; equal packages and equal settings shall yield equal
+floating RGB output including partial-support behavior.
+
+#### REQ-PROV-010 Stage record completeness
+
+Each persisted processing stage record shall contain its stable stage and algorithm
+IDs, versions, parent/source identities, branch, input/output domain and grid,
+requested settings, resolved settings and output content identity.
+
+### Background pedestal correction
+
+#### REQ-BG-001 Persisted sky regions
+
+Pedestal estimation shall use persisted ICRS inclusion rectangles and optional
+ICRS exclusion rectangles rasterized at aligned-grid pixel centers according to
+BG-PED-001, independently of viewport coordinates.
+
+#### REQ-BG-002 Common valid samples
+
+Every participating plane in a branch shall use the same geometric sky selection
+intersected with the common finite-valid, positive-coverage sample mask, and shall
+report the geometric and common-valid sample counts and fraction.
+
+#### REQ-BG-003 Deterministic robust estimator
+
+Pedestal proposals shall use the deterministic sigma-clipped median, thresholds,
+failure states and diagnostics specified by BG-PED-001.
+
+#### REQ-BG-004 Explicit proposal and application
+
+Automatic pedestal estimates shall be presented as explicit proposals and shall
+not affect canonical rendering until resolved per-plane values and their numerical
+identity are applied to the scene.
+
+#### REQ-BG-005 Linear correction contract
+
+Applied pedestals shall be subtracted only from valid aligned-linear samples before
+derived arithmetic and display normalization, while preserving signed residuals,
+coverage, celestial WCS, grid, branch and lineage and retaining the pre-correction
+aligned checkpoint.
+
+#### REQ-BG-006 Unsupported sampling
+
+Missing regions, incompatible grids, identity mismatches or insufficient samples
+shall fail visibly and shall not silently select the whole frame, reuse stale
+values or produce an inferred correction.
+
+#### REQ-BG-007 Diagnostics and provenance
+
+Each applied branch shall persist requested estimator/region settings, resolved
+per-plane values, common-sample diagnostics, a viewable region overlay and a
+background stage record conforming to PROV-001.
+
+#### REQ-BG-008 User workflow
+
+The UI shall provide pedestal proposal preview, Apply and disable controls, show
+the region overlay and before/after diagnostics, and persist applied settings so
+save/reopen, rendering and export reproduce the same correction.
+
+#### REQ-NORM-009 Background-referenced black policy
+
+The `corrected_zero` policy shall use corrected native zero as the plane and mapped
+channel black reference without recomputing a black percentile; the separate
+`legacy_percentile` policy shall preserve prior behavior as specified by
+NORM-BG-001.
+
+### Presentation coverage and stable normalization
+
+#### REQ-COV-001 Explicit presentation policy
+
+Each scene shall independently persist an output-footprint policy and a tone-
+reference policy. Output footprint shall be `available_contributors` or
+`common_required_bands`; tone reference shall be `output_support` or
+`common_required_bands`. Omitted fields shall resolve to legacy union output and
+output-support tone statistics, while newly materialized recommended defaults
+shall use union output with common-required-band tone statistics.
+
+#### REQ-COV-002 Required-band identity
+
+Common required-band support shall intersect finite-valid, positive-coverage
+support for every enabled mapped plane having at least one nonzero RGB weight and
+for every source dependency of a mapped derived plane.
+
+#### REQ-COV-003 Unsupported samples
+
+Union output shall retain every channel sample having a valid contributor. The
+same tone transform resolved from the configured reference pixels shall be applied
+to partial-support samples without division by contributor count, local gain
+adjustment, synthesis, interpolation, or relabeling. Common-only output shall set
+all RGB channels to zero outside the common mask.
+
+#### REQ-COV-004 Empty and disconnected support
+
+An empty common mask shall stop composition when either output footprint or tone
+reference requires common support. Disconnected components shall all remain
+selected; no component shall be silently preferred or discarded, and internal
+holes shall remain unsupported.
+
+#### REQ-COV-005 Optional bounding crop
+
+The `bounding_box` crop mode shall enclose every component of the selected output support,
+expand each bound by the persisted nonnegative integer padding, clip the expansion
+to the original raster, and update celestial WCS by the exact applied pixel slice.
+The `none` mode shall preserve the original raster dimensions and WCS.
+
+#### REQ-COV-006 Stable tone domain
+
+When tone reference is `common_required_bands`, each output channel's black and
+white statistics shall use the uncropped common mask, while the resulting transform
+shall be applied over that channel's selected output-valid samples. Changing output
+footprint, crop mode, or padding alone shall not change numerical tone results for
+pixels common to the compared outputs.
+
+#### REQ-COV-007 Coverage diagnostics
+
+Each composed branch shall report the output and tone-reference policies, crop mode and padding,
+required mapped planes and source dependencies, union and common pixel counts,
+common-to-union fraction, connected-component count, excluded pixel count, and
+applied crop bounds and output shape.
+
+#### REQ-COV-008 Coverage workflow
+
+The UI shall display independent output-footprint and brightness-reference controls
+plus crop controls, preview the output and diagnostics before Apply, and persist
+applied settings across save and reopen. Applied changes shall make prior renders stale.
+
+#### REQ-NORM-010 Fixed numerical bounds
+
+Per-plane display normalization shall support persisted finite `black_value` and
+`white_value` bounds, require `black_value < white_value`, and use those values
+without percentile re-estimation.
+
+#### REQ-NORM-011 Region-derived normalization proposal
+
+The system shall calculate a normalization proposal only from an explicitly
+selected persisted Phase 3 inclusion region after applying its exclusions and the
+common finite-valid, positive-coverage sample mask. Empty, incompatible, or
+constant samples shall fail visibly.
+
+#### REQ-NORM-012 Locked normalization reference
+
+Applying a region-derived proposal shall persist its region identities, branch,
+grid, source identities, native unit, coverage policy, requested percentiles,
+resolved bounds, sample count, clipping fractions, and locked state. Rendering
+shall consume the resolved bounds and shall not recompute them implicitly.
+
+#### REQ-NORM-013 Explicit recomputation
+
+Recomputing a region-derived reference shall require an explicit user action,
+replace the resolved reference with newly recorded values, and invalidate only
+downstream render products.
+
+#### REQ-NORM-014 Normalization workflow
+
+The UI shall distinguish legacy percentile, fixed-value, and applied
+region-reference normalization, show resolved bounds and clipping fractions, and
+support preview, Apply, save, reopen, and consistent original/deconvolved branch
+behavior.
 
 ### Command-line interface
 
@@ -1175,9 +2095,8 @@ The system does not currently support:
 - polygon-based archive queries
 - advanced astrometric refinement
 - empirical PSF fitting
-- robust geometric output derivation for mixed footprints
 - physically exact PSF transport through reprojection for a single-kernel post-reprojection workflow
 
-The initial canvas is a search-region enclosure, not an automatic optimal crop of mixed observations. For a circle, the unrotated bounding square has side twice the radius; for a rectangle, use its supplied dimensions. Round pixel dimensions upward. A discovery hint with no usable region requires user-supplied dimensions before initialization.
+The search-region enclosure is provisional until selected FITS footprints can be inspected. The target behavior for initial and user-requested fitting is defined by REQ-REFINE-033 through REQ-REFINE-039, REQ-WCS-009 through REQ-WCS-016, and the [selected-footprint viewport specification](viewport_framing_spec.md). Implementation remains tracked by GAP-FRAME-001.
 
 Local name-catalog acquisition, fuzzy matching, category browsing, “Surprise me,” automatic cross-observation mosaics, and a sky-map browsing screen remain proposals. They require separate accepted requirements before implementation.

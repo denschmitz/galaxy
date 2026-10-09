@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from astropy.io import fits
+from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
 import numpy as np
 from scipy.signal import convolve2d
 
@@ -13,11 +15,23 @@ from galaxy.fitsio import FITSPlane
 DECONVOLVED_SUFFIX = "__deconvolved"
 
 
-def apply_presentation_psf(planes: dict[str, np.ndarray], psf: PSFConfig) -> dict[str, np.ndarray]:
+def apply_presentation_psf(
+    planes: dict[str, np.ndarray],
+    psf: PSFConfig,
+    *,
+    pixel_scales_arcsec: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, np.ndarray]:
     if not psf.enabled:
         return planes
 
-    resolved = {name: _resolve_kernel_spec(name, psf) for name in planes}
+    resolved = {
+        name: _resolve_kernel_spec(
+            name,
+            psf,
+            pixel_scales_arcsec=(pixel_scales_arcsec or {}).get(name),
+        )
+        for name in planes
+    }
     if not any(spec is not None for spec in resolved.values()):
         raise ValueError("psf.enabled requires either common_psf_fwhm_arcsec or an enabled per-plane kernel configuration")
 
@@ -40,7 +54,10 @@ def build_deconvolved_plane_artifacts(planes: list[FITSPlane], psf: PSFConfig, c
     if not psf.enabled:
         return []
 
-    resolved = {plane.plane_id: _resolve_kernel_spec(plane.plane_id, psf) for plane in planes}
+    resolved = {
+        plane.plane_id: _resolve_kernel_spec(plane.plane_id, psf, wcs=plane.wcs)
+        for plane in planes
+    }
     if not any(spec is not None for spec in resolved.values()):
         raise ValueError(
             "psf.enabled requires a valid kernel for at least one enabled plane in the deconvolved branch"
@@ -57,6 +74,11 @@ def build_deconvolved_plane_artifacts(planes: list[FITSPlane], psf: PSFConfig, c
                 spec["kernel"],
                 iterations=spec["iterations"],
                 regularization=spec["regularization"],
+                valid_mask=(
+                    np.isfinite(plane.data)
+                    if plane.mask is None
+                    else np.isfinite(plane.data) & ~np.asarray(plane.mask, dtype=bool)
+                ),
             )
         )
         source_path = Path(str(plane.metadata.get("source_path") or cache_dir / f"{plane.plane_id}.fits"))
@@ -79,7 +101,13 @@ def build_deconvolved_plane_artifacts(planes: list[FITSPlane], psf: PSFConfig, c
     return processed_planes
 
 
-def _resolve_kernel_spec(plane_name: str, psf: PSFConfig) -> dict[str, object] | None:
+def _resolve_kernel_spec(
+    plane_name: str,
+    psf: PSFConfig,
+    *,
+    wcs: WCS | None = None,
+    pixel_scales_arcsec: tuple[float, float] | None = None,
+) -> dict[str, object] | None:
     plane_config = psf.per_plane.get(plane_name)
     if plane_config is not None and not plane_config.enabled:
         return None
@@ -88,7 +116,8 @@ def _resolve_kernel_spec(plane_name: str, psf: PSFConfig) -> dict[str, object] |
     if plane_config is not None and plane_config.kernel_path:
         kernel = _load_kernel(Path(plane_config.kernel_path))
     elif psf.common_psf_fwhm_arcsec is not None:
-        kernel = _gaussian_kernel_from_fwhm(psf.common_psf_fwhm_arcsec)
+        scales = pixel_scales_arcsec or _celestial_pixel_scales_arcsec(wcs)
+        kernel = _gaussian_kernel_from_fwhm(psf.common_psf_fwhm_arcsec, scales)
     elif plane_config is not None and plane_config.enabled:
         raise ValueError(f"psf enabled for plane '{plane_name}' but no kernel source was configured")
 
@@ -132,21 +161,54 @@ def _load_kernel(path: Path) -> np.ndarray:
     raise ValueError(f"no image data found in PSF kernel file: {path}")
 
 
-def _gaussian_kernel_from_fwhm(fwhm_arcsec: float) -> np.ndarray:
-    sigma = max(float(fwhm_arcsec) / 2.355, 0.3)
-    radius = max(int(np.ceil(3.0 * sigma)), 1)
-    axis = np.arange(-radius, radius + 1, dtype=np.float32)
-    xx, yy = np.meshgrid(axis, axis, indexing="xy")
-    kernel = np.exp(-0.5 * (xx**2 + yy**2) / (sigma**2))
+def _celestial_pixel_scales_arcsec(wcs: WCS | None) -> tuple[float, float]:
+    if wcs is None or not wcs.has_celestial:
+        raise ValueError("angular Gaussian PSF requires a two-dimensional celestial WCS or explicit pixel scales")
+    celestial = wcs.celestial
+    matrix = np.asarray(celestial.pixel_scale_matrix, dtype=np.float64)
+    if matrix.shape != (2, 2) or not np.isfinite(matrix).all():
+        raise ValueError("angular Gaussian PSF requires finite two-dimensional celestial pixel geometry")
+    first, second = matrix[:, 0], matrix[:, 1]
+    first_norm, second_norm = float(np.linalg.norm(first)), float(np.linalg.norm(second))
+    if first_norm <= 0 or second_norm <= 0:
+        raise ValueError("angular Gaussian PSF requires positive celestial pixel scales")
+    relative_dot = abs(float(np.dot(first, second))) / (first_norm * second_norm)
+    if relative_dot > 1e-6:
+        raise ValueError("angular Gaussian PSF does not support skewed celestial pixel geometry")
+    scales = np.asarray(proj_plane_pixel_scales(celestial), dtype=np.float64) * 3600.0
+    return float(scales[0]), float(scales[1])
+
+
+def _gaussian_kernel_from_fwhm(
+    fwhm_arcsec: float,
+    pixel_scales_arcsec: tuple[float, float],
+) -> np.ndarray:
+    fwhm = float(fwhm_arcsec)
+    scales = np.asarray(pixel_scales_arcsec, dtype=np.float64)
+    if not np.isfinite(fwhm) or fwhm <= 0:
+        raise ValueError("Gaussian PSF FWHM must be finite and positive")
+    if scales.shape != (2,) or not np.isfinite(scales).all() or np.any(scales <= 0):
+        raise ValueError("Gaussian PSF pixel scales must contain two finite positive values")
+    sigma_x, sigma_y = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)) * scales)
+    radius_x = max(int(np.ceil(4.0 * sigma_x)), 1)
+    radius_y = max(int(np.ceil(4.0 * sigma_y)), 1)
+    x_axis = np.arange(-radius_x, radius_x + 1, dtype=np.float64)
+    y_axis = np.arange(-radius_y, radius_y + 1, dtype=np.float64)
+    xx, yy = np.meshgrid(x_axis, y_axis, indexing="xy")
+    kernel = np.exp(-0.5 * ((xx / sigma_x) ** 2 + (yy / sigma_y) ** 2))
     return _normalize_kernel(kernel)
 
 
 def _normalize_kernel(kernel: np.ndarray) -> np.ndarray:
-    clipped = np.clip(np.asarray(kernel, dtype=np.float32), 0.0, None)
-    total = float(clipped.sum())
+    values = np.asarray(kernel, dtype=np.float64)
+    if values.ndim != 2 or any(size % 2 == 0 for size in values.shape):
+        raise ValueError("PSF kernel must be a two-dimensional array with odd dimensions")
+    if not np.isfinite(values).all() or np.any(values < 0):
+        raise ValueError("PSF kernel must contain only finite nonnegative values")
+    total = float(values.sum(dtype=np.float64))
     if total <= 0:
         raise ValueError("PSF kernel must contain positive values")
-    return clipped / total
+    return (values / total).astype(np.float32)
 
 
 def _richardson_lucy(
@@ -154,20 +216,38 @@ def _richardson_lucy(
     kernel: np.ndarray,
     iterations: int,
     regularization: float,
+    valid_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    observed = np.clip(np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
-    estimate = np.maximum(observed, 1e-6).astype(np.float32)
-    mirrored = kernel[::-1, ::-1]
+    values = np.asarray(image, dtype=np.float32)
+    valid = np.isfinite(values) if valid_mask is None else np.asarray(valid_mask, dtype=bool)
+    if valid.shape != values.shape:
+        raise ValueError("Richardson-Lucy validity mask must match the image shape")
+    valid &= np.isfinite(values)
+    if not np.any(valid):
+        raise ValueError("Richardson-Lucy input has no finite valid samples")
+    if np.any(values[valid] < 0):
+        raise ValueError("Richardson-Lucy requires nonnegative valid samples; signed inputs are unsupported")
+
+    mask = valid.astype(np.float32)
+    observed = np.where(valid, values, 0.0).astype(np.float32)
+    estimate = np.where(valid, np.maximum(observed, 1e-6), 0.0).astype(np.float32)
+    normalized_kernel = _normalize_kernel(kernel)
+    mirrored = normalized_kernel[::-1, ::-1]
+    sensitivity = convolve2d(mask, mirrored, mode="same", boundary="fill", fillvalue=0.0)
     regularization_term = max(float(regularization), 0.0)
 
     for _ in range(iterations):
-        blurred = convolve2d(estimate, kernel, mode="same", boundary="symm")
-        relative_blur = observed / np.maximum(blurred + regularization_term, 1e-6)
-        estimate *= convolve2d(relative_blur, mirrored, mode="same", boundary="symm")
-        estimate = np.clip(estimate, 0.0, None)
+        blurred = convolve2d(estimate, normalized_kernel, mode="same", boundary="fill", fillvalue=0.0)
+        relative_blur = np.zeros_like(observed)
+        relative_blur[valid] = observed[valid] / np.maximum(blurred[valid], 1e-6)
+        correction = convolve2d(relative_blur, mirrored, mode="same", boundary="fill", fillvalue=0.0)
+        estimate[valid] *= correction[valid] / np.maximum(sensitivity[valid], 1e-6)
+        estimate[valid] = np.clip(estimate[valid], 0.0, None)
+        estimate[~valid] = 0.0
 
     if regularization_term > 0:
         blend = regularization_term / (1.0 + regularization_term)
         estimate = estimate * (1.0 - blend) + observed * blend
 
+    estimate[~valid] = 0.0
     return estimate.astype(np.float32)

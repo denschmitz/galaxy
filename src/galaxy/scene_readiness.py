@@ -5,7 +5,7 @@ from collections.abc import Mapping as PlaneMap
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .scene_models import SceneCard, document, effective_inputs
+from .scene_models import SceneCard, bridge_snapshot_matches, document, effective_inputs
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +22,7 @@ Branch = Literal["original", "deconvolved"]
 def readiness(
     card: SceneCard, action: Action, *, plane_filters: PlaneMap[str, str] | None = None,
     branch: Branch = "original", render_id: str | None = None,
+    inspected_plane_ids: bool = False,
 ) -> list[ReadinessIssue]:
     """Return field-addressed issues. Empty means ready, not binary availability."""
     card = SceneCard.model_validate(document(card))
@@ -60,7 +61,8 @@ def readiness(
         need("output.destination_directory")
         candidates = [r for r in card.renders or [] if render_id is None or r.render_id == render_id]
         if not any(r.branch == branch and r.content_revision == card.content_revision
-                   and effective_inputs(r.inputs) == effective_inputs(card) for r in candidates):
+                   and effective_inputs(r.inputs) == effective_inputs(card)
+                   and bridge_snapshot_matches(r.inputs, card) for r in candidates):
             issue("renders", "a successful render matching current inputs and requested branch is required", "stale")
         return issues
 
@@ -73,11 +75,58 @@ def readiness(
     ):
         need(path)
     for channel in ("red", "green", "blue"):
-        for path in (f"tone.stretch.{channel}.kind", f"tone.stretch.{channel}.parameter",
+        for path in (f"tone.stretch.{channel}.kind",
                      f"tone.gain.{channel}", f"tone.bias.{channel}"):
             need(path)
+        stretch = data.get("tone", {}).get("stretch", {}).get(channel, {})
+        if stretch.get("kind") in ("asinh", "gamma"):
+            need(f"tone.stretch.{channel}.parameter")
+        if stretch.get("kind") == "ghs":
+            for field in (
+                "stretch_factor", "local_intensity", "symmetry_point",
+                "shadow_protection", "highlight_protection",
+            ):
+                need(f"tone.stretch.{channel}.{field}")
+    tone = data.get("tone", {})
+    if tone.get("application", "per_channel") == "shared_intensity":
+        shared = tone.get("shared_stretch", {})
+        need("tone.shared_stretch.kind")
+        if shared.get("kind") in ("asinh", "gamma"):
+            need("tone.shared_stretch.parameter")
+        if shared.get("kind") == "ghs":
+            for field in (
+                "stretch_factor", "local_intensity", "symmetry_point",
+                "shadow_protection", "highlight_protection",
+            ):
+                need(f"tone.shared_stretch.{field}")
     if data.get("canvas", {}).get("center", {}).get("mode") != "explicit":
         issue("canvas.center.mode", "render requires an explicit resolved center")
+
+    background = data.get("background", {})
+    background_mode = background.get("mode", "off")
+    if background_mode not in ("off", "pedestal"):
+        issue("background.mode", "must be off or pedestal", "invalid")
+    if background_mode == "off":
+        if background.get("black_reference_policy", "legacy_percentile") != "legacy_percentile":
+            issue(
+                "background.black_reference_policy",
+                "off mode requires legacy_percentile", "invalid",
+            )
+    else:
+        if background.get("black_reference_policy") not in (
+            "legacy_percentile", "corrected_zero"
+        ):
+            issue("background.black_reference_policy", "must be explicitly supplied")
+        if not background.get("inclusion_regions"):
+            issue("background.inclusion_regions", "pedestal mode requires a sky region")
+        for key in ("clip_sigma", "max_iterations", "minimum_samples", "minimum_valid_fraction"):
+            if key not in background.get("estimator", {}):
+                issue(f"background.estimator.{key}", "must be explicitly supplied")
+        if not background.get("resolved_branches", {}).get(branch):
+            issue(
+                f"background.resolved_branches.{branch}",
+                f"preview and Apply a {branch} pedestal proposal before rendering",
+            )
 
     selection = data.get("selection", {})
     products = {p["product_id"]: p for p in selection.get("products", [])}
@@ -104,6 +153,25 @@ def readiness(
     source = dict(plane_filters)
     if not source:
         issue("planes", "no usable source planes were inspected")
+    if background_mode == "pedestal" and inspected_plane_ids:
+        resolved_background = background.get("resolved_branches", {}).get(branch, {})
+        for plane_id in sorted(source):
+            record = resolved_background.get(plane_id)
+            if record is None:
+                issue(
+                    f"background.resolved_branches.{branch}.{plane_id}",
+                    "applied pedestal value is required",
+                )
+            elif record.get("branch") != branch:
+                issue(
+                    f"background.resolved_branches.{branch}.{plane_id}.branch",
+                    f"must match requested {branch} branch", "stale",
+                )
+        for plane_id in sorted(set(resolved_background) - set(source)):
+            issue(
+                f"background.resolved_branches.{branch}.{plane_id}",
+                "resolved pedestal references an unknown source plane", "reference",
+            )
     product_filters = {products[pid].get("filter") for pid in selected if pid in products}
     if any(value not in product_filters for value in source.values()):
         issue("selection.products", "inspected filters must belong to selected product metadata", "reference")
@@ -220,4 +288,3 @@ def _discovery(data: dict[str, Any], need: Any, issue: Any) -> None:
         need("target.region.width_arcmin")
         need("target.region.height_arcmin")
     need("search.observation_selection")
-

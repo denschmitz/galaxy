@@ -6,7 +6,6 @@ dist/
 .mypy_cache/
 .coverage
 artifacts/*
-!artifacts/Pillars.json
 galaxy.config.json
 cache/
 *.pyc
@@ -18,4 +17,3 @@ cache/
 .tmp_test_psf
 .tmp_pytest/
 .tmp_test_cli/
-examples/artifacts/

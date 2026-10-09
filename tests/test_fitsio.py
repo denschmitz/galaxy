@@ -59,3 +59,27 @@ def test_load_fits_plane_rejects_missing_wcs(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="missing WCS"):
         load_fits_plane(source)
+
+
+def test_load_fits_plane_combines_dq_wht_ctx_and_records_native_unit(tmp_path) -> None:
+    source = tmp_path / "masked.fits"
+    _write_sample_fits(source)
+    with fits.open(source, mode="update") as hdul:
+        hdul["SCI"].header["BUNIT"] = "ELECTRONS/S"
+        weight = np.ones((4, 4), dtype=np.float32)
+        weight[1, 1] = 0.0
+        context = np.ones((4, 4), dtype=np.int16)
+        context[3, 3] = 0
+        hdul.append(fits.ImageHDU(data=weight, name="WHT"))
+        hdul.append(fits.ImageHDU(data=context, name="CTX"))
+
+    plane = load_fits_plane(source)
+
+    assert plane.metadata["native_unit"] == "ELECTRONS/S"
+    assert plane.metadata["mask_sources"] == ["DQ", "WHT", "CTX"]
+    assert plane.mask is not None
+    assert plane.mask[0, 1]
+    assert plane.mask[1, 1]
+    assert plane.mask[2, 2]
+    assert plane.mask[3, 3]
+    assert plane.metadata["input_valid_fraction"] == pytest.approx(12 / 16)

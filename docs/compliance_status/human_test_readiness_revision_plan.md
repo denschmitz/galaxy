@@ -1,8 +1,10 @@
 # Bundled Example Human-Test Readiness Revision Plan
 
 Date: 2026-09-15.
-Status: implementation and automated entry verification complete; manual
-`AC-HUMAN-001` signoff pending.
+Status: superseded on 2026-09-19 by REQ-LIB-007 through REQ-LIB-019 and the revised
+`AC-HUMAN-001`. This document records the earlier protected-example implementation
+pass and shall not be used as the current acceptance procedure. The current
+procedure is in `docs/testing/ui_scene_coverage.md`.
 
 ## 1. Objective
 
